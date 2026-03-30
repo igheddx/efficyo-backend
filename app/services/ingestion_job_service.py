@@ -1,0 +1,270 @@
+from __future__ import annotations
+
+import logging
+from uuid import UUID
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.core.db import SessionLocal, utc_now
+from app.models.ingestion_job import IngestionJob
+from app.services import cloud_account_service, detection_service, ingestion_service, recommendation_service, tenant_service
+
+logger = logging.getLogger(__name__)
+
+
+class ActiveSyncJobExists(Exception):
+    """Another sync job is already queued or running for this cloud account."""
+
+    def __init__(self, job: IngestionJob) -> None:
+        self.job = job
+
+
+def _validate_scope(db_session: Session, tenant_id: UUID, cloud_account_id: UUID) -> None:
+    cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+
+
+def get_active_sync_job(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+) -> IngestionJob | None:
+    """Return the most recent queued or running job for this scope, if any."""
+    _validate_scope(db_session, tenant_id, cloud_account_id)
+    return (
+        db_session.query(IngestionJob)
+        .filter(
+            IngestionJob.tenant_id == tenant_id,
+            IngestionJob.cloud_account_id == cloud_account_id,
+            IngestionJob.status.in_(("queued", "running")),
+        )
+        .order_by(IngestionJob.created_at.desc())
+        .first()
+    )
+
+
+def create_sync_job(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    job_type: str = "full_sync",
+) -> IngestionJob:
+    active = get_active_sync_job(db_session, tenant_id, cloud_account_id)
+    if active is not None:
+        raise ActiveSyncJobExists(active)
+    job = IngestionJob(
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+        job_type=job_type,
+        status="queued",
+    )
+    db_session.add(job)
+    try:
+        db_session.commit()
+        db_session.refresh(job)
+    except IntegrityError:
+        db_session.rollback()
+        existing = get_active_sync_job(db_session, tenant_id, cloud_account_id)
+        if existing is not None:
+            raise ActiveSyncJobExists(existing) from None
+        raise
+    return job
+
+
+def list_sync_jobs(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    limit: int = 20,
+) -> list[IngestionJob]:
+    _validate_scope(db_session, tenant_id, cloud_account_id)
+    return (
+        db_session.query(IngestionJob)
+        .filter(
+            IngestionJob.tenant_id == tenant_id,
+            IngestionJob.cloud_account_id == cloud_account_id,
+        )
+        .order_by(IngestionJob.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def get_sync_job(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    job_id: UUID,
+) -> IngestionJob:
+    _validate_scope(db_session, tenant_id, cloud_account_id)
+    job = (
+        db_session.query(IngestionJob)
+        .filter(
+            IngestionJob.id == job_id,
+            IngestionJob.tenant_id == tenant_id,
+            IngestionJob.cloud_account_id == cloud_account_id,
+        )
+        .first()
+    )
+    if job is None:
+        raise ValueError("sync_job_not_found")
+    return job
+
+
+def _run_sync_pipeline(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    job_type: str,
+    sync_run_id: UUID,
+) -> None:
+    if job_type in {"full_sync", "analysis_refresh"}:
+        ingestion_service.ingest_ec2(db_session, tenant_id, cloud_account_id)
+        ingestion_service.ingest_ebs(db_session, tenant_id, cloud_account_id)
+        ingestion_service.ingest_rds(db_session, tenant_id, cloud_account_id)
+        ingestion_service.ingest_lambda(db_session, tenant_id, cloud_account_id)
+        ingestion_service.ingest_s3(db_session, tenant_id, cloud_account_id)
+
+        detection_service.detect_ec2_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
+        detection_service.detect_ebs_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
+        detection_service.detect_rds_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
+        detection_service.detect_lambda_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
+        detection_service.detect_s3_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
+
+        recommendation_service.generate_rds_recommendations(
+            db_session, tenant_id, cloud_account_id, sync_run_id=sync_run_id
+        )
+        return
+
+    if job_type == "cost_refresh":
+        detection_service.detect_ec2_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
+        recommendation_service.generate_rds_recommendations(
+            db_session, tenant_id, cloud_account_id, sync_run_id=sync_run_id
+        )
+        return
+
+
+def _failure_message(exc: BaseException) -> str:
+    text = (str(exc) or "").strip() or type(exc).__name__
+    return (text or "Sync job failed")[:2000]
+
+
+def _emit_sync_notifications(db_session: Session, job_id: UUID) -> None:
+    """Best-effort in-app alerts after a job reaches completed or failed."""
+    try:
+        from app.services import approvals_service, notification_service
+
+        job = db_session.query(IngestionJob).filter(IngestionJob.id == job_id).first()
+        if job is None or job.status not in ("completed", "failed"):
+            return
+        ok = job.status == "completed"
+        notification_service.notify_sync_terminal(
+            db_session,
+            tenant_id=job.tenant_id,
+            cloud_account_id=job.cloud_account_id,
+            job_id=job.id,
+            success=ok,
+            error_message=job.error_message if not ok else None,
+        )
+        if ok:
+            org_id = notification_service.org_id_for_tenant(db_session, job.tenant_id)
+            if org_id:
+                n = approvals_service.count_pending_approvals_for_organization(db_session, org_id)
+                notification_service.notify_pending_approvals_after_sync(db_session, org_id, n)
+    except Exception:
+        logger.exception("Failed to emit sync notifications", extra={"job_id": str(job_id)})
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+
+
+def _mark_job_terminal_failed(db_session: Session, job_id: UUID, exc: BaseException) -> None:
+    """Persist failed terminal state; safe to call after a prior commit/rollback."""
+    job = db_session.query(IngestionJob).filter(IngestionJob.id == job_id).first()
+    if job is None:
+        return
+    if job.status not in ("queued", "running"):
+        return
+    now = utc_now()
+    job.status = "failed"
+    job.completed_at = now
+    job.updated_at = now
+    job.error_message = _failure_message(exc)
+    db_session.add(job)
+    db_session.commit()
+
+
+def execute_sync_job(job_id: UUID) -> None:
+    db_session = SessionLocal()
+    try:
+        job = db_session.query(IngestionJob).filter(IngestionJob.id == job_id).first()
+        if job is None:
+            return
+        # Only jobs created as queued should run; avoids double execution.
+        if job.status != "queued":
+            return
+
+        job.status = "running"
+        job.started_at = utc_now()
+        job.error_message = None
+        job.updated_at = utc_now()
+        db_session.add(job)
+        db_session.commit()
+        db_session.refresh(job)
+
+        try:
+            tenant_service.refresh_tipwave_demo_cloud_account_metadata(db_session)
+            _run_sync_pipeline(db_session, job.tenant_id, job.cloud_account_id, job.job_type, job.id)
+            job.status = "completed"
+            job.completed_at = utc_now()
+            job.error_message = None
+            job.updated_at = utc_now()
+            db_session.add(job)
+            db_session.commit()
+            _emit_sync_notifications(db_session, job.id)
+        except Exception as exc:
+            logger.exception("Sync job failed", extra={"job_id": str(job_id)})
+            err_text = _failure_message(exc)
+            job.status = "failed"
+            job.completed_at = utc_now()
+            job.error_message = err_text
+            job.updated_at = utc_now()
+            # started_at remains set when failure occurs after run began
+            db_session.add(job)
+            try:
+                db_session.commit()
+                _emit_sync_notifications(db_session, job.id)
+            except Exception as commit_exc:
+                logger.exception(
+                    "Failed to commit sync job failure row",
+                    extra={"job_id": str(job_id)},
+                )
+                db_session.rollback()
+                try:
+                    _mark_job_terminal_failed(db_session, job_id, commit_exc)
+                    _emit_sync_notifications(db_session, job_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to recover sync job failure state",
+                        extra={"job_id": str(job_id)},
+                    )
+                    db_session.rollback()
+    except Exception as exc:
+        logger.exception("Sync job worker crashed", extra={"job_id": str(job_id)})
+        try:
+            db_session.rollback()
+        except Exception:
+            pass
+        try:
+            _mark_job_terminal_failed(db_session, job_id, exc)
+            _emit_sync_notifications(db_session, job_id)
+        except Exception:
+            logger.exception(
+                "Failed to persist sync job failure after worker crash",
+                extra={"job_id": str(job_id)},
+            )
+            db_session.rollback()
+    finally:
+        db_session.close()
+
