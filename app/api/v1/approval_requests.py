@@ -99,7 +99,9 @@ def create_approval_request_endpoint(
             cloud_account_id=body.cloud_account_id,
             recommendation_id=body.recommendation_id,
             approver_user_ids=body.approver_user_ids,
+            execution_owner_user_id=body.execution_owner_user_id,
             approval_mode=body.approval_mode,
+            tag_values=body.tag_values,
             submitted_by=ctx.email,
             submitted_by_role=ctx.role,
         )
@@ -118,6 +120,31 @@ def create_approval_request_endpoint(
             "approver_ineligible_role": (
                 status.HTTP_400_BAD_REQUEST,
                 "Each approver must have approver access (or higher) on this tenant and cloud account.",
+            ),
+            "execution_owner_not_in_org": (
+                status.HTTP_400_BAD_REQUEST,
+                "Execution owner must be a member of this organization.",
+            ),
+            "execution_owner_ineligible_role": (
+                status.HTTP_400_BAD_REQUEST,
+                "Execution owner must have owner-capable access (admin, approver, or owner).",
+            ),
+            "tag_values_required_for_tag_recommendation": (
+                status.HTTP_400_BAD_REQUEST,
+                "Save required tag key/value pairs before submitting this recommendation for approval.",
+            ),
+            "duplicate_tag_key": (status.HTTP_400_BAD_REQUEST, "Duplicate tag key is not allowed."),
+            "tag_key_required": (status.HTTP_400_BAD_REQUEST, "Tag key is required."),
+            "tag_value_required": (status.HTTP_400_BAD_REQUEST, "Tag value is required."),
+            "tag_key_too_long": (status.HTTP_400_BAD_REQUEST, "Tag key must be 128 characters or fewer."),
+            "tag_value_too_long": (status.HTTP_400_BAD_REQUEST, "Tag value must be 256 characters or fewer."),
+            "tag_key_invalid_chars": (
+                status.HTTP_400_BAD_REQUEST,
+                "Tag key contains invalid characters.",
+            ),
+            "tag_value_invalid_chars": (
+                status.HTTP_400_BAD_REQUEST,
+                "Tag value contains invalid characters.",
             ),
             "unsupported_approval_mode": (status.HTTP_400_BAD_REQUEST, "Only all_required is supported."),
             "recommendation_not_pending": (

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.cost_window import account_cost_window_fields, wow_ce_14d_window_fields
 from app.core.db import get_db
 from app.core.user_context import UserContext, get_user_context
+from app.models.recommendation import Recommendation
 from app.schemas.cloud_account import (
     ActionPlanRead,
     CostTrendsSeriesRead,
@@ -50,6 +51,8 @@ from app.schemas.recommendation_outcome import (
     RecommendationWorkflowProgressRead,
     RecommendationWorkflowRead,
     RecommendationWorkflowTimelineRead,
+    RecommendationTagValuesRead,
+    RecommendationTagValuesSaveRequest,
     SavingsProofSummaryRead,
 )
 from app.services.ingestion_job_service import ActiveSyncJobExists
@@ -69,6 +72,7 @@ from app.services import (
     safe_execution_service,
     simulation_service,
     summary_service,
+    tag_values_service,
     tenant_scope_service,
     trend_service,
     insight_narration_service,
@@ -94,6 +98,8 @@ def _min_access_for_cloud_route(request: Request) -> str | None:
         return None
     method = request.method.upper()
     if path.endswith("/approve") or path.endswith("/reject"):
+        return "approver"
+    if path.endswith("/tag-values"):
         return "approver"
     if path.endswith("/execute") or path.endswith("/mark-applied") or path.endswith("/mark-acted-on"):
         return "admin"
@@ -1072,30 +1078,18 @@ def cost_summary_endpoint(
         elif error_msg == "cloud_account_not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
         raise
-    except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        if error_code in _AWS_AUTH_ERROR_CODES:
-            error_type = "aws_authorization_error"
-        elif error_code in _AWS_CE_UNAVAILABLE_ERROR_CODES:
-            error_type = "aws_service_unavailable"
-        else:
-            error_type = "aws_client_error"
-        logger.exception(
-            "AWS ClientError during Cost Explorer fetch",
-            extra={"tenant_id": str(tenant_id), "cloud_account_id": str(cloud_account_id), "aws_error_code": error_code},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": error_type, "aws_error_code": error_code, "message": exc.response["Error"]["Message"]},
-        ) from exc
     except Exception as exc:
         logger.exception(
-            "Cost summary failed at API layer",
+            "Snapshot-backed cost summary failed at API layer",
             extra={"tenant_id": str(tenant_id), "cloud_account_id": str(cloud_account_id)},
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": "aws_service_error", "message": str(exc)},
+            detail={
+                "error_type": "cost_snapshot_unavailable",
+                "message": str(exc),
+                "hint": "Run a cost sync job to refresh snapshots.",
+            },
         ) from exc
 
     return CostSummaryRead(**result)
@@ -1120,33 +1114,34 @@ def cost_trends_endpoint(
         if error_msg == "cloud_account_not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
         raise
-    except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        if error_code in _AWS_AUTH_ERROR_CODES:
-            error_type = "aws_authorization_error"
-        elif error_code in _AWS_CE_UNAVAILABLE_ERROR_CODES:
-            error_type = "aws_service_unavailable"
-        else:
-            error_type = "aws_client_error"
-        logger.exception(
-            "AWS ClientError during Cost Explorer trend fetch",
-            extra={"tenant_id": str(tenant_id), "cloud_account_id": str(cloud_account_id), "aws_error_code": error_code},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": error_type, "aws_error_code": error_code, "message": exc.response["Error"]["Message"]},
-        ) from exc
     except Exception as exc:
         logger.exception(
-            "Cost trends failed at API layer",
+            "Snapshot-backed cost trends failed at API layer",
             extra={"tenant_id": str(tenant_id), "cloud_account_id": str(cloud_account_id)},
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": "aws_service_error", "message": str(exc)},
+            detail={
+                "error_type": "cost_snapshot_unavailable",
+                "message": str(exc),
+                "hint": "Run a cost sync job to refresh snapshots.",
+            },
         ) from exc
 
-    rows_sorted = sorted(rows, key=lambda r: abs(r["percent_change"]), reverse=True)
+    normalized_rows: list[dict] = []
+    for row in rows:
+        row_dict = dict(row)
+        if not row_dict.get("summary"):
+            service = str(row_dict.get("service") or "Service")
+            trend = str(row_dict.get("trend") or "stable")
+            try:
+                percent_change = float(row_dict.get("percent_change") or 0.0)
+            except (TypeError, ValueError):
+                percent_change = 0.0
+            row_dict["summary"] = trend_service._summary_line(service, trend, percent_change)
+        normalized_rows.append(row_dict)
+
+    rows_sorted = sorted(normalized_rows, key=lambda r: abs(r["percent_change"]), reverse=True)
     meta = wow_ce_14d_window_fields()
     return CostTrendsListRead(
         cost_window=meta["cost_window"],
@@ -1176,16 +1171,14 @@ def cost_trends_over_time_endpoint(
         if error_msg == "cloud_account_not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
         raise
-    except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": "aws_client_error", "aws_error_code": error_code, "message": exc.response["Error"]["Message"]},
-        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": "aws_service_error", "message": str(exc)},
+            detail={
+                "error_type": "cost_snapshot_unavailable",
+                "message": str(exc),
+                "hint": "Run a cost sync job to refresh snapshots.",
+            },
         ) from exc
     return CostTrendsSeriesRead(**result)
 
@@ -1232,30 +1225,18 @@ def insights_endpoint(
         if error_msg == "cloud_account_not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
         raise
-    except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        if error_code in _AWS_AUTH_ERROR_CODES:
-            error_type = "aws_authorization_error"
-        elif error_code in _AWS_CE_UNAVAILABLE_ERROR_CODES:
-            error_type = "aws_service_unavailable"
-        else:
-            error_type = "aws_client_error"
-        logger.exception(
-            "AWS ClientError during insights fetch",
-            extra={"tenant_id": str(tenant_id), "cloud_account_id": str(cloud_account_id), "aws_error_code": error_code},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": error_type, "aws_error_code": error_code, "message": exc.response["Error"]["Message"]},
-        ) from exc
     except Exception as exc:
         logger.exception(
-            "Insights narration failed at API layer",
+            "Snapshot-backed insights narration failed at API layer",
             extra={"tenant_id": str(tenant_id), "cloud_account_id": str(cloud_account_id)},
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": "aws_service_error", "message": str(exc)},
+            detail={
+                "error_type": "cost_snapshot_unavailable",
+                "message": str(exc),
+                "hint": "Run a cost sync job to refresh snapshots.",
+            },
         ) from exc
 
     return InsightsRead(**result)
@@ -1308,30 +1289,18 @@ def ec2_other_breakdown_endpoint(
         elif error_msg == "cloud_account_not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
         raise
-    except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        if error_code in _AWS_AUTH_ERROR_CODES:
-            error_type = "aws_authorization_error"
-        elif error_code in _AWS_CE_UNAVAILABLE_ERROR_CODES:
-            error_type = "aws_service_unavailable"
-        else:
-            error_type = "aws_client_error"
-        logger.exception(
-            "AWS ClientError during EC2-Other Cost Explorer fetch",
-            extra={"tenant_id": str(tenant_id), "cloud_account_id": str(cloud_account_id), "aws_error_code": error_code},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": error_type, "aws_error_code": error_code, "message": exc.response["Error"]["Message"]},
-        ) from exc
     except Exception as exc:
         logger.exception(
-            "EC2-Other breakdown failed at API layer",
+            "Snapshot-backed EC2-Other breakdown failed at API layer",
             extra={"tenant_id": str(tenant_id), "cloud_account_id": str(cloud_account_id)},
         )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": "aws_service_error", "message": str(exc)},
+            detail={
+                "error_type": "cost_snapshot_unavailable",
+                "message": str(exc),
+                "hint": "Run a cost sync job to refresh snapshots.",
+            },
         ) from exc
 
     return Ec2OtherBreakdownRead(**result)
@@ -1648,6 +1617,25 @@ def execute_recommendation_endpoint(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Policy requires a successful preflight before execution. Open the recommendation to run preflight, then try again.",
             ) from exc
+        if error_msg == "tag_values_required_for_tag_recommendation":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Save required tag key/value pairs before executing this recommendation.",
+            ) from exc
+        if error_msg == "duplicate_tag_key":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Duplicate tag key is not allowed.") from exc
+        if error_msg == "tag_key_required":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag key is required.") from exc
+        if error_msg == "tag_value_required":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag value is required.") from exc
+        if error_msg == "tag_key_too_long":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag key must be 128 characters or fewer.") from exc
+        if error_msg == "tag_value_too_long":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag value must be 256 characters or fewer.") from exc
+        if error_msg == "tag_key_invalid_chars":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag key contains invalid characters.") from exc
+        if error_msg == "tag_value_invalid_chars":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag value contains invalid characters.") from exc
         if error_msg == "tenant_not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found.") from exc
         raise
@@ -1664,6 +1652,105 @@ def execute_recommendation_endpoint(
         ) from exc
 
     return RecommendationExecuteRead(**result)
+
+
+@router.get(
+    "/{cloud_account_id}/recommendations/{recommendation_id}/tag-values",
+    response_model=RecommendationTagValuesRead,
+    status_code=status.HTTP_200_OK,
+)
+def get_recommendation_tag_values_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+    db_session: Session = Depends(get_db),
+) -> RecommendationTagValuesRead:
+    rec = (
+        db_session.query(Recommendation)
+        .filter(
+            Recommendation.id == recommendation_id,
+            Recommendation.tenant_id == tenant_id,
+            Recommendation.cloud_account_id == cloud_account_id,
+        )
+        .first()
+    )
+    if rec is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation not found")
+    if (rec.recommendation_type or "").strip().lower() != "s3_add_required_tags":
+        return RecommendationTagValuesRead(tag_values={}, account_tag_keys=[])
+    outcome = recommendation_outcome_service.create_outcome_for_recommendation(
+        db_session=db_session,
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+        recommendation_id=recommendation_id,
+    )
+    return RecommendationTagValuesRead(
+        tag_values=dict(outcome.tag_values_json or {}),
+        account_tag_keys=tag_values_service.list_account_tag_keys(
+            db_session, cloud_account_id=cloud_account_id
+        ),
+    )
+
+
+@router.put(
+    "/{cloud_account_id}/recommendations/{recommendation_id}/tag-values",
+    response_model=RecommendationTagValuesRead,
+    status_code=status.HTTP_200_OK,
+)
+def save_recommendation_tag_values_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+    body: RecommendationTagValuesSaveRequest,
+    db_session: Session = Depends(get_db),
+) -> RecommendationTagValuesRead:
+    rec = (
+        db_session.query(Recommendation)
+        .filter(
+            Recommendation.id == recommendation_id,
+            Recommendation.tenant_id == tenant_id,
+            Recommendation.cloud_account_id == cloud_account_id,
+        )
+        .first()
+    )
+    if rec is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation not found")
+    if (rec.recommendation_type or "").strip().lower() != "s3_add_required_tags":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag values are only supported for tag recommendations.")
+    try:
+        values = tag_values_service.validate_tag_entries([x.model_dump() for x in body.entries])
+    except ValueError as exc:
+        mapping = {
+            "duplicate_tag_key": "Duplicate tag key is not allowed.",
+            "tag_key_required": "Tag key is required.",
+            "tag_value_required": "Tag value is required.",
+            "tag_key_too_long": "Tag key must be 128 characters or fewer.",
+            "tag_value_too_long": "Tag value must be 256 characters or fewer.",
+            "tag_key_invalid_chars": "Tag key contains invalid characters.",
+            "tag_value_invalid_chars": "Tag value contains invalid characters.",
+        }
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=mapping.get(str(exc), "Invalid tag values.")) from exc
+
+    outcome = recommendation_outcome_service.create_outcome_for_recommendation(
+        db_session=db_session,
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+        recommendation_id=recommendation_id,
+    )
+    outcome.tag_values_json = values or None
+    db_session.add(outcome)
+    tag_values_service.upsert_account_tag_keys(
+        db_session,
+        cloud_account_id=cloud_account_id,
+        keys=list(values.keys()),
+    )
+    db_session.commit()
+    return RecommendationTagValuesRead(
+        tag_values=values,
+        account_tag_keys=tag_values_service.list_account_tag_keys(
+            db_session, cloud_account_id=cloud_account_id
+        ),
+    )
 
 
 @router.get(
@@ -1749,12 +1836,6 @@ def dry_run_recommendation_endpoint(
         if error_msg == "recommendation_not_found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation not found") from exc
         raise
-    except ClientError as exc:
-        error_code = exc.response["Error"]["Code"]
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={"error_type": "aws_client_error", "aws_error_code": error_code, "message": exc.response["Error"]["Message"]},
-        ) from exc
 
     return RecommendationDryRunRead(**result)
 

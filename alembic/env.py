@@ -20,6 +20,9 @@ from app.models.resource_snapshot import ResourceSnapshot  # noqa: F401
 from app.models.tenant import Tenant  # noqa: F401
 from app.models.notification import Notification  # noqa: F401
 from app.models.approval_request import ApprovalAssignment, ApprovalRequest  # noqa: F401
+from app.models.execution_owner import ExecutionOwnerAssignment  # noqa: F401
+from app.models.sync_pipeline import SyncJob, SyncTask, SyncJobEvent  # noqa: F401
+from app.models.cost_snapshot import CostApiUsageLog, CostFetchLock, CostSnapshot, CostSyncPolicy  # noqa: F401
 
 # this is the Alembic Config object
 config = context.config

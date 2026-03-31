@@ -16,11 +16,14 @@ from app.services.access_resolution_service import (
 )
 from app.models.approval_request import ApprovalAssignment, ApprovalRequest
 from app.models.cloud_account import CloudAccount
+from app.models.execution_owner import ExecutionOwnerAssignment
 from app.models.organization import OrgMembership
 from app.models.recommendation import Recommendation
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.services import recommendation_outcome_service
+from app.services import tag_values_service
+from app.services.execution_policy_service import resolve_execution_policy
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +198,20 @@ def request_to_read(req: ApprovalRequest, *, include_assignments: bool = False) 
         "updated_at": req.updated_at,
         "approvals_complete": done,
         "approvals_required": required,
+        "execution_owner_user_id": None,
+        "execution_owner_name": None,
+        "execution_owner_role": None,
+        "tag_values": dict(req.requested_tag_values_json or {}) if req.requested_tag_values_json else None,
     }
+    owner = (
+        req.execution_owner_assignments[0]
+        if getattr(req, "execution_owner_assignments", None)
+        else None
+    )
+    if owner is not None:
+        base["execution_owner_user_id"] = owner.owner_user_id
+        base["execution_owner_name"] = owner.owner_name_snapshot
+        base["execution_owner_role"] = owner.owner_role_snapshot
     if include_assignments:
         base["assignments"] = list(req.assignments or [])
     return base
@@ -208,7 +224,9 @@ def create_approval_request(
     cloud_account_id: UUID,
     recommendation_id: UUID,
     approver_user_ids: list[UUID],
+    execution_owner_user_id: UUID,
     approval_mode: str,
+    tag_values: dict[str, str] | None,
     submitted_by: str | None,
     submitted_by_role: str | None,
 ) -> ApprovalRequest:
@@ -262,7 +280,6 @@ def create_approval_request(
         unique_approvers.append(uid)
     if not unique_approvers:
         raise ValueError("no_approvers")
-
     for uid in unique_approvers:
         m = (
             db.query(OrgMembership, User)
@@ -285,6 +302,44 @@ def create_approval_request(
             assignee_membership_role=_mem.role or "",
         ):
             raise ValueError("approver_ineligible_role")
+    owner_member_row = (
+        db.query(OrgMembership, User)
+        .join(User, User.id == OrgMembership.user_id)
+        .filter(
+            OrgMembership.organization_id == organization_id,
+            OrgMembership.user_id == execution_owner_user_id,
+        )
+        .first()
+    )
+    if owner_member_row is None:
+        raise ValueError("execution_owner_not_in_org")
+    owner_mem, owner_user = owner_member_row
+    owner_eff = resolve_effective_access_for_user(
+        db,
+        user_id=execution_owner_user_id,
+        organization_id=organization_id,
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+        membership_role=owner_mem.role or "",
+    )
+    if access_rank(owner_eff) < access_rank("approver") and (owner_mem.role or "").strip().lower() != "owner":
+        raise ValueError("execution_owner_ineligible_role")
+
+    validated_tag_values = tag_values_service.validate_tag_values(tag_values)
+    policy = resolve_execution_policy(
+        db,
+        organization_id=organization_id,
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+        recommendation_type=rec.recommendation_type,
+        recommendation_risk_level=rec.risk_level,
+    )
+    requires_saved_tags = (
+        (rec.recommendation_type or "").strip().lower() == "s3_add_required_tags"
+        and policy.execution_mode in {"approved_then_manual", "approved_then_auto_allowed"}
+    )
+    if requires_saved_tags and not validated_tag_values:
+        raise ValueError("tag_values_required_for_tag_recommendation")
 
     now = utc_now()
     req = ApprovalRequest(
@@ -294,6 +349,7 @@ def create_approval_request(
         recommendation_id=recommendation_id,
         submitted_by=submitted_by,
         submitted_by_role=submitted_by_role,
+        requested_tag_values_json=validated_tag_values or None,
         approval_mode=approval_mode,
         status="submitted",
         submitted_at=now,
@@ -321,6 +377,27 @@ def create_approval_request(
                 approver_role_snapshot=mem.role or "approver",
                 status="pending",
             )
+        )
+    db.add(
+        ExecutionOwnerAssignment(
+            organization_id=organization_id,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            recommendation_id=recommendation_id,
+            approval_request_id=req.id,
+            owner_user_id=execution_owner_user_id,
+            owner_name_snapshot=owner_user.display_name or owner_user.email or str(execution_owner_user_id),
+            owner_role_snapshot=owner_mem.role or "approver",
+            assigned_by=submitted_by,
+            assigned_by_role=submitted_by_role,
+            assigned_at=now,
+        )
+    )
+
+    if validated_tag_values:
+        outcome.tag_values_json = validated_tag_values
+        tag_values_service.upsert_account_tag_keys(
+            db, cloud_account_id=cloud_account_id, keys=list(validated_tag_values.keys())
         )
 
     db.commit()

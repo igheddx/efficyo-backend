@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Numeric, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from app.core.db import Base, utc_now
 
@@ -62,6 +62,7 @@ class RecommendationOutcome(Base):
     applied_access_role = Column(String(20), nullable=True)
     applied_at = Column(DateTime(timezone=True), nullable=True)
     execution_notes = Column(Text, nullable=True)
+    tag_values_json = Column(JSONB, nullable=True)
 
     # Last successful preflight ("ready") — used when execution policy requires preflight.
     preflight_passed_at = Column(DateTime(timezone=True), nullable=True)
@@ -77,4 +78,10 @@ class RecommendationOutcome(Base):
             f"<RecommendationOutcome(id={self.id}, recommendation_id={self.recommendation_id}, "
             f"status={self.status})>"
         )
+
+    @property
+    def tag_values(self) -> dict[str, str] | None:
+        if self.tag_values_json is None:
+            return None
+        return dict(self.tag_values_json)
 

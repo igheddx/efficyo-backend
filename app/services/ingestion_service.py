@@ -7,7 +7,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.services import aws_inventory_service, cloud_account_service, resource_snapshot_service
+from app.services import aws_extended_inventory, aws_inventory_service, cloud_account_service, resource_snapshot_service
 
 logger = logging.getLogger(__name__)
 
@@ -266,3 +266,45 @@ def ingest_ebs(
         ingested_count=ingested_count,
         captured_at=captured_at,
     )
+
+
+def ingest_extended_aws_services(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+) -> dict[str, int]:
+    """
+    Ingest extended AWS services (CloudFront, ACM, API Gateway, EventBridge, SES, VPC components).
+
+    Returns per-batch counts keyed by logical name (not necessarily ``resource_type``).
+    """
+    cloud_account = cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    role_arn = cloud_account.role_arn
+    region = cloud_account.region_default
+
+    counts: dict[str, int] = {}
+    batches = aws_extended_inventory.fetch_all_extended(role_arn, region)
+    for key, resources in batches.items():
+        if not resources:
+            counts[key] = 0
+            continue
+        try:
+            n, _ = resource_snapshot_service.create_snapshots(
+                db_session,
+                tenant_id,
+                cloud_account_id,
+                resources,
+            )
+            counts[key] = n
+        except Exception:
+            logger.exception(
+                "Extended AWS inventory batch failed",
+                extra={
+                    "tenant_id": str(tenant_id),
+                    "cloud_account_id": str(cloud_account_id),
+                    "batch": key,
+                },
+            )
+            raise
+
+    return counts

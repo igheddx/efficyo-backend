@@ -5,6 +5,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from sqlalchemy import Column, DateTime, ForeignKey, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -32,6 +33,7 @@ class ApprovalRequest(Base):
 
     submitted_by = Column(String(320), nullable=True)
     submitted_by_role = Column(String(32), nullable=True)
+    requested_tag_values_json = Column(JSONB, nullable=True)
     approval_mode = Column(String(32), nullable=False, default="all_required")
     status = Column(String(32), nullable=False, default="submitted", index=True)
 
@@ -46,6 +48,11 @@ class ApprovalRequest(Base):
         "ApprovalAssignment",
         back_populates="approval_request",
         cascade="all, delete-orphan",
+    )
+    execution_owner_assignments = relationship(
+        "ExecutionOwnerAssignment",
+        cascade="all, delete-orphan",
+        back_populates="approval_request",
     )
 
 

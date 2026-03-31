@@ -1,0 +1,2 @@
+"""Rightsizing analyzer domain."""
+

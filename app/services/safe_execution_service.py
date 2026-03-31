@@ -15,6 +15,7 @@ from app.models.cloud_account import CloudAccount
 from app.models.recommendation import Recommendation
 from app.models.tenant import Tenant
 from app.services import approval_request_service, aws_assume_role_service, recommendation_outcome_service
+from app.services import tag_values_service
 from app.services.cloud_account_service import get_cloud_account_or_raise as _get_cloud_account_or_raise
 from app.services.execution_audit_service import log_execution_audit_event
 from app.services.execution_constants import is_safe_auto_execution_type
@@ -231,10 +232,17 @@ def execute_recommendation(
     rollback = "Capture current configuration first and revert to known-good state if needed."
 
     try:
+        effective_tag_values = tag_values_service.validate_tag_values(tag_values)
+        if rtype == "s3_add_required_tags" and not effective_tag_values:
+            effective_tag_values = tag_values_service.validate_tag_values(
+                dict(outcome.tag_values_json or {}) if outcome.tag_values_json else {}
+            )
+        if rtype == "s3_add_required_tags" and not effective_tag_values:
+            raise ValueError("tag_values_required_for_tag_recommendation")
         if rtype == "s3_enable_public_access_block":
             notes, rollback = _execute_s3_public_access_block(s3_client, rec.resource_id)
         elif rtype == "s3_add_required_tags":
-            notes, rollback = _execute_s3_add_required_tags(s3_client, rec.resource_id, tag_values)
+            notes, rollback = _execute_s3_add_required_tags(s3_client, rec.resource_id, effective_tag_values)
     except (ClientError, BotoCoreError) as exc:
         fail_note = f"Execution failed for {rec.recommendation_type} on {rec.resource_id}: {str(exc)}"
         log_execution_audit_event(
@@ -283,7 +291,7 @@ def execute_recommendation(
         execution_notes=notes,
         applied_membership_role=applied_membership_role,
         applied_access_role=applied_access_role,
-        applied_via_auto=False,
+        applied_via_auto=(policy.execution_mode == "approved_then_auto_allowed"),
     )
 
     log_execution_audit_event(

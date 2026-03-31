@@ -7,7 +7,8 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.core.cost_window import account_cost_window_fields, round_currency, round_percentage
-from app.services import cloud_account_service, cost_explorer_service, recommendation_intelligence_service, recommendation_service
+from app.cost import query_service
+from app.services import cloud_account_service, recommendation_intelligence_service, recommendation_service
 
 
 @dataclass
@@ -104,7 +105,7 @@ def get_cloud_account_summary(
     """Build summary from latest recommendations for a tenant-scoped cloud account."""
     cloud_account = cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
 
-    cost_summary = cost_explorer_service.fetch_cost_summary(role_arn=cloud_account.role_arn)
+    cost_summary = query_service.get_summary(db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id)
     _cw_defaults = account_cost_window_fields()
     cost_window = str(cost_summary.get("cost_window") or _cw_defaults["cost_window"])
     cost_window_label = str(cost_summary.get("cost_window_label") or _cw_defaults["cost_window_label"])

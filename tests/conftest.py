@@ -44,9 +44,12 @@ def db() -> Generator[Session, None, None]:
     from app.models.tenant import Tenant  # noqa: F401
     from app.models.notification import Notification  # noqa: F401
     from app.models.approval_request import ApprovalAssignment, ApprovalRequest  # noqa: F401
+    from app.models.execution_owner import ExecutionOwnerAssignment  # noqa: F401
     from app.models.access_grant import AccessGrant  # noqa: F401
     from app.models.execution_audit_event import ExecutionAuditEvent  # noqa: F401
     from app.models.execution_policy import ExecutionPolicy  # noqa: F401
+    from app.models.account_tag_key import AccountTagKey  # noqa: F401
+    from app.models.cost_snapshot import CostApiUsageLog, CostFetchLock, CostSnapshot, CostSyncPolicy  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     session = TestingSessionLocal()

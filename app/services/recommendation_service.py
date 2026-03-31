@@ -131,6 +131,52 @@ def guided_actions_for_type(recommendation_type: str) -> tuple[list[str], str, s
             "easy",
         )
 
+    if rtype in {
+        "ec2_add_required_tags",
+        "cloudfront_add_required_tags",
+        "acm_add_required_tags",
+        "apigateway_add_required_tags",
+        "apigateway_http_add_required_tags",
+        "eventbridge_add_required_tags",
+        "ses_add_required_tags",
+        "vpc_add_required_tags",
+        "subnet_add_required_tags",
+        "nat_gateway_add_required_tags",
+        "internet_gateway_add_required_tags",
+        "security_group_add_required_tags",
+    }:
+        return (
+            [
+                "Open the resource in the AWS console or update IaC",
+                "Add Name and Environment tags per your tagging standard",
+                "Confirm ownership and cost allocation mappings",
+            ],
+            "5-15 minutes",
+            "easy",
+        )
+
+    if rtype == "ec2_review_stopped_instance":
+        return (
+            [
+                "Confirm whether the instance is still required",
+                "Snapshot or back up data before termination",
+                "Terminate unused instances or start them if still needed",
+            ],
+            "15-30 minutes",
+            "medium",
+        )
+
+    if rtype == "acm_review_certificate_expiry":
+        return (
+            [
+                "Open ACM and review validation status for the certificate",
+                "Renew or re-validate DNS before the not-after date",
+                "Update dependent CloudFront, ALB, or API Gateway associations if the ARN changes",
+            ],
+            "30-60 minutes",
+            "medium",
+        )
+
     return (
         [
             "Review resource configuration",
@@ -263,15 +309,34 @@ def _recommendation_category_for_type(recommendation_type: str) -> str:
         "s3_add_lifecycle_policy",
         "nat_gateway_cost_review",
         "waf_cost_review",
+        "ec2_review_stopped_instance",
     }:
         return "cost"
     if recommendation_type in {
         "rds_disable_public_access",
         "s3_enable_public_access_block",
         "s3_enable_versioning",
+        "acm_review_certificate_expiry",
     }:
         return "security"
     return "governance"
+
+
+# finding_type -> (recommendation_type, human noun for copy)
+_GOVERNANCE_TAG_FINDING_TO_RECOMMENDATION: dict[str, tuple[str, str]] = {
+    "ec2_missing_required_tags": ("ec2_add_required_tags", "EC2 instance"),
+    "cloudfront_distribution_missing_required_tags": ("cloudfront_add_required_tags", "CloudFront distribution"),
+    "acm_certificate_missing_required_tags": ("acm_add_required_tags", "ACM certificate"),
+    "apigateway_rest_api_missing_required_tags": ("apigateway_add_required_tags", "API Gateway REST API"),
+    "apigateway_http_api_missing_required_tags": ("apigateway_http_add_required_tags", "API Gateway HTTP API"),
+    "eventbridge_rule_missing_required_tags": ("eventbridge_add_required_tags", "EventBridge rule"),
+    "ses_email_identity_missing_required_tags": ("ses_add_required_tags", "SES identity"),
+    "vpc_missing_required_tags": ("vpc_add_required_tags", "VPC"),
+    "subnet_missing_required_tags": ("subnet_add_required_tags", "subnet"),
+    "nat_gateway_missing_required_tags": ("nat_gateway_add_required_tags", "NAT gateway"),
+    "internet_gateway_missing_required_tags": ("internet_gateway_add_required_tags", "internet gateway"),
+    "security_group_missing_required_tags": ("security_group_add_required_tags", "security group"),
+}
 
 
 def _build_recommendation_for_finding(
@@ -281,6 +346,86 @@ def _build_recommendation_for_finding(
     created_at: datetime,
 ) -> Recommendation | None:
     estimated_savings = finding.estimated_savings
+
+    tag_map = _GOVERNANCE_TAG_FINDING_TO_RECOMMENDATION.get(finding.finding_type)
+    if tag_map:
+        rtype, noun = tag_map
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary=f"Add required tags to {noun}",
+            explanation=f"This {noun.lower()} is missing one or more required tags: Name, Environment.",
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Add Name and Environment tags in AWS for governance and allocation.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "ec2_stopped_instance":
+        rtype = "ec2_review_stopped_instance"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review stopped EC2 instance",
+            explanation=(
+                "This instance is in the stopped state. If it is no longer needed, terminate it or "
+                "create an AMI snapshot before removal to avoid wasted EBS and management overhead."
+            ),
+            risk_level="low",
+            confidence_score="medium",
+            recommended_action="Confirm ownership, terminate if obsolete, or start if still required.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "acm_certificate_expiring_soon":
+        evidence = finding.evidence_json or {}
+        days = evidence.get("days_remaining")
+        rtype = "acm_review_certificate_expiry"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        detail = f" Renews in about {days} days." if days is not None else ""
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Renew or replace ACM certificate before expiry",
+            explanation=(
+                "An ACM certificate is approaching expiration. Plan validation/renewal to avoid "
+                "TLS or availability issues for dependent resources."
+                + detail
+            ),
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Complete DNS validation or re-import; update dependent distributions/endpoints.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
 
     if finding.finding_type == "rds_missing_required_tags":
         rtype = "rds_add_required_tags"
@@ -588,6 +733,20 @@ _RECOMMENDATION_SOURCE_FINDING_TYPES = (
     "s3_lifecycle_policy_missing",
     "nat_gateway_cost_review_candidate",
     "waf_cost_review_candidate",
+    "ec2_missing_required_tags",
+    "ec2_stopped_instance",
+    "cloudfront_distribution_missing_required_tags",
+    "acm_certificate_missing_required_tags",
+    "acm_certificate_expiring_soon",
+    "apigateway_rest_api_missing_required_tags",
+    "apigateway_http_api_missing_required_tags",
+    "eventbridge_rule_missing_required_tags",
+    "ses_email_identity_missing_required_tags",
+    "vpc_missing_required_tags",
+    "subnet_missing_required_tags",
+    "nat_gateway_missing_required_tags",
+    "internet_gateway_missing_required_tags",
+    "security_group_missing_required_tags",
 )
 
 

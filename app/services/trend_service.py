@@ -17,7 +17,8 @@ from app.core.cost_window import (
     savings_outcomes_nd_window_fields,
     utc_today,
 )
-from app.services import cloud_account_service, cost_explorer_service, recommendation_service
+from app.cost import query_service
+from app.services import cloud_account_service, recommendation_service
 
 
 def _sum_services_for_days(
@@ -66,45 +67,8 @@ def detect_cost_trends(db_session: Session, tenant_id: UUID, cloud_account_id: U
 
     Returns a list of trend dicts sorted by service name; callers may re-order for display.
     """
-    cloud_account = cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
-    daily_rows = cost_explorer_service.fetch_daily_unblended_cost_by_service_last_14_days(
-        role_arn=cloud_account.role_arn
-    )
-
-    if len(daily_rows) >= 14:
-        previous_days = daily_rows[-14:-7]
-        last_days = daily_rows[-7:]
-    elif len(daily_rows) >= 7:
-        last_days = daily_rows[-7:]
-        previous_days = daily_rows[:-7]
-    else:
-        last_days = daily_rows
-        previous_days = []
-
-    prev_by_service = _sum_services_for_days(previous_days)
-    curr_by_service = _sum_services_for_days(last_days)
-
-    all_services = sorted(set(prev_by_service.keys()) | set(curr_by_service.keys()))
-
-    results: list[dict[str, Any]] = []
-    for service in all_services:
-        previous_cost = prev_by_service.get(service, Decimal("0.00"))
-        current_cost = curr_by_service.get(service, Decimal("0.00"))
-        percent_change, trend = _percent_change_and_trend(previous_cost, current_cost)
-        pct_rounded = round_currency(percent_change)
-
-        results.append(
-            {
-                "service": service,
-                "trend": trend,
-                "percent_change": pct_rounded,
-                "current_cost": round_currency(current_cost),
-                "previous_cost": round_currency(previous_cost),
-                "summary": _summary_line(service, trend, pct_rounded),
-            }
-        )
-
-    return results
+    cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    return query_service.get_wow_trends(db_session, tenant_id, cloud_account_id)
 
 
 def cost_trends_over_time(
@@ -117,33 +81,11 @@ def cost_trends_over_time(
     Daily total AWS cost trend for the last ``days`` using Cost Explorer DAILY + SERVICE,
     aggregated to one total per date.
     """
-    cloud_account = cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
     window_days = max(1, int(days))
-    daily_rows = cost_explorer_service.fetch_daily_unblended_cost_by_service(
-        role_arn=cloud_account.role_arn,
-        days=window_days,
-    )
-
-    points: list[dict[str, Any]] = []
-    for day in daily_rows:
-        total = sum((Decimal(v) for v in (day.get("by_service") or {}).values()), Decimal("0.00"))
-        points.append(
-            {
-                "date": day["date"],
-                "total_cost": float(total.quantize(Decimal("0.01"))),
-            }
-        )
-
-    meta = (
-        account_cost_window_fields()
-        if window_days == 30
-        else rolling_nd_window_fields(window_days)
-    )
-    return {
-        "days": window_days,
-        "points": points,
-        **meta,
-    }
+    data = query_service.get_cost_trends(db_session, tenant_id, cloud_account_id)
+    meta = account_cost_window_fields() if window_days == 30 else rolling_nd_window_fields(window_days)
+    return {"days": window_days, "points": data.get("points", []), **meta}
 
 
 def savings_trends_over_time(

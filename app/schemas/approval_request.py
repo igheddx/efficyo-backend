@@ -23,7 +23,9 @@ class ApprovalRequestCreate(BaseModel):
     organization_id: UUID
     cloud_account_id: UUID
     approver_user_ids: list[UUID] = Field(..., min_length=1)
+    execution_owner_user_id: UUID
     approval_mode: str = Field(default="all_required", max_length=32)
+    tag_values: dict[str, str] | None = None
 
 
 class ApprovalAssignmentRead(BaseModel):
@@ -58,6 +60,10 @@ class ApprovalRequestRead(BaseModel):
     updated_at: datetime
     approvals_complete: int = 0
     approvals_required: int = 0
+    execution_owner_user_id: UUID | None = None
+    execution_owner_name: str | None = None
+    execution_owner_role: str | None = None
+    tag_values: dict[str, str] | None = None
 
     model_config = {"from_attributes": True}
 

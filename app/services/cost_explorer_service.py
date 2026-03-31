@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 _COST_EXPLORER_REGION = "us-east-1"
 _EC2_OTHER_SERVICE_NAME = "EC2 - Other"
 
+# IMPORTANT COST CONTROL:
+# This module contains raw AWS Cost Explorer calls and must only be invoked via
+# app.cost.client.CostExplorerClient. UI/API GET flows must never call this directly.
+
 
 def _empty_cost_summary(start: date, end: date) -> dict:
     return {

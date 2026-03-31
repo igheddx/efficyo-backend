@@ -1,0 +1,2 @@
+"""Cost analyzer domain."""
+

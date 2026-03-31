@@ -1,0 +1,2 @@
+"""Security analyzer domain."""
+

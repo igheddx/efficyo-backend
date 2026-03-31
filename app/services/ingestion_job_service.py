@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.core.db import SessionLocal, utc_now
 from app.models.ingestion_job import IngestionJob
 from app.services import cloud_account_service, detection_service, ingestion_service, recommendation_service, tenant_service
+from app.sync.jobs.cost_sync import CostSyncJobRunner
+from app.sync.jobs.resource_sync import run_resource_sync
 
 logger = logging.getLogger(__name__)
 
@@ -118,29 +120,30 @@ def _run_sync_pipeline(
     job_type: str,
     sync_run_id: UUID,
 ) -> None:
-    if job_type in {"full_sync", "analysis_refresh"}:
-        ingestion_service.ingest_ec2(db_session, tenant_id, cloud_account_id)
-        ingestion_service.ingest_ebs(db_session, tenant_id, cloud_account_id)
-        ingestion_service.ingest_rds(db_session, tenant_id, cloud_account_id)
-        ingestion_service.ingest_lambda(db_session, tenant_id, cloud_account_id)
-        ingestion_service.ingest_s3(db_session, tenant_id, cloud_account_id)
-
-        detection_service.detect_ec2_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
-        detection_service.detect_ebs_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
-        detection_service.detect_rds_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
-        detection_service.detect_lambda_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
-        detection_service.detect_s3_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
-
-        recommendation_service.generate_rds_recommendations(
-            db_session, tenant_id, cloud_account_id, sync_run_id=sync_run_id
+    if job_type in {"full_sync", "analysis_refresh", "resource_sync"}:
+        run_resource_sync(
+            db_session,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            sync_run_id=sync_run_id,
         )
         return
 
-    if job_type == "cost_refresh":
-        detection_service.detect_ec2_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
-        recommendation_service.generate_rds_recommendations(
-            db_session, tenant_id, cloud_account_id, sync_run_id=sync_run_id
+    if job_type in {"cost_refresh", "cost_sync"}:
+        runner = CostSyncJobRunner()
+        runner.run(
+            db_session,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            sync_job_id=sync_run_id,
+            force_refresh=(job_type == "cost_refresh"),
+            actor_role="system",
+            actor_is_platform_root=False,
+            actor_is_system=True,
         )
+        # Re-run analyzers/recommendations against snapshots so findings stay aligned.
+        detection_service.detect_ec2_findings(db_session, tenant_id, cloud_account_id, sync_run_id)
+        recommendation_service.generate_rds_recommendations(db_session, tenant_id, cloud_account_id, sync_run_id=sync_run_id)
         return
 
 

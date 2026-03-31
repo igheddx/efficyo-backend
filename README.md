@@ -91,3 +91,29 @@ The script will:
 - call cloud account validation
 - call EC2 ingestion
 - print JSON responses for each step
+
+## Daily Cost Sync (Snapshot-First)
+
+Cost data is designed to be synced on a schedule and read from DB snapshots by UI routes.
+
+Run one daily sync pass manually:
+
+```bash
+python scripts/cost_sync_daily.py
+```
+
+Useful flags:
+
+```bash
+# one tenant/account only
+python scripts/cost_sync_daily.py --tenant-id <tenant_uuid> --cloud-account-id <account_uuid>
+
+# force refresh even if snapshot is fresh
+python scripts/cost_sync_daily.py --force-refresh
+```
+
+Example cron (daily at 02:15 server time):
+
+```bash
+15 2 * * * cd /path/to/repo/backend && /path/to/repo/.venv/bin/python scripts/cost_sync_daily.py >> /var/log/fptnext-cost-sync.log 2>&1
+```

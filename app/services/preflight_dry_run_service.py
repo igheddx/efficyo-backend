@@ -279,6 +279,23 @@ def run_preflight(
     }
 
 
+def _dry_run_aws_client_error_result(rec: Recommendation, exc: ClientError) -> dict[str, Any]:
+    code = str(exc.response.get("Error", {}).get("Code", "") or "")
+    msg = str(exc.response.get("Error", {}).get("Message", "") or "")
+    rtype = (rec.recommendation_type or "").lower()
+    return {
+        "recommendation_id": rec.id,
+        "recommendation_type": rtype,
+        "risk_level": rec.risk_level,
+        "before": {},
+        "after": {},
+        "impact_summary": (
+            f"Could not load AWS state for dry-run ({code or 'ClientError'}): {msg}. "
+            "Check the execution role can read bucket configuration (e.g. s3:GetBucketTagging, s3:GetPublicAccessBlock)."
+        ),
+    }
+
+
 def run_dry_run(
     db_session: Session,
     tenant_id: UUID,
@@ -303,45 +320,48 @@ def run_dry_run(
     s3 = _s3_client_for_cloud(cloud)
     bucket = rec.resource_id
 
-    if rtype == "s3_enable_public_access_block":
-        before_cfg: dict[str, Any] = dict(_DEFAULT_PAB)
-        try:
-            resp = s3.get_public_access_block(Bucket=bucket)
-            cfg = resp.get("PublicAccessBlockConfiguration") or {}
-            for k in _DEFAULT_PAB:
-                before_cfg[k] = bool(cfg.get(k))
-        except ClientError as exc:
-            code = exc.response.get("Error", {}).get("Code", "")
-            if code != "NoSuchPublicAccessBlockConfiguration":
-                raise
-        after_cfg = dict(_TARGET_PAB)
+    try:
+        if rtype == "s3_enable_public_access_block":
+            before_cfg: dict[str, Any] = dict(_DEFAULT_PAB)
+            try:
+                resp = s3.get_public_access_block(Bucket=bucket)
+                cfg = resp.get("PublicAccessBlockConfiguration") or {}
+                for k in _DEFAULT_PAB:
+                    before_cfg[k] = bool(cfg.get(k))
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code != "NoSuchPublicAccessBlockConfiguration":
+                    raise
+            after_cfg = dict(_TARGET_PAB)
+            summary = (
+                "Will set BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy, and RestrictPublicBuckets to true "
+                f"for bucket {bucket}."
+            )
+            return {
+                "recommendation_id": rec.id,
+                "recommendation_type": rtype,
+                "risk_level": rec.risk_level,
+                "before": {"bucket": bucket, "public_access_block_configuration": before_cfg},
+                "after": {"bucket": bucket, "public_access_block_configuration": after_cfg},
+                "impact_summary": summary,
+            }
+
+        # s3_add_required_tags
+        existing = _get_bucket_tags(s3, bucket)
+        merged = _merge_tags_for_tags_recommendation(existing, tag_values)
+        before_sorted = dict(sorted(existing.items(), key=lambda x: x[0]))
+        after_sorted = dict(sorted(merged.items(), key=lambda x: x[0]))
         summary = (
-            "Will set BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy, and RestrictPublicBuckets to true "
-            f"for bucket {bucket}."
+            f"Will apply tag set with {len(after_sorted)} keys on bucket {bucket}, "
+            "preserving existing tags and ensuring Name and Environment are present."
         )
         return {
             "recommendation_id": rec.id,
             "recommendation_type": rtype,
             "risk_level": rec.risk_level,
-            "before": {"bucket": bucket, "public_access_block_configuration": before_cfg},
-            "after": {"bucket": bucket, "public_access_block_configuration": after_cfg},
+            "before": {"bucket": bucket, "tags": before_sorted},
+            "after": {"bucket": bucket, "tags": after_sorted},
             "impact_summary": summary,
         }
-
-    # s3_add_required_tags
-    existing = _get_bucket_tags(s3, bucket)
-    merged = _merge_tags_for_tags_recommendation(existing, tag_values)
-    before_sorted = dict(sorted(existing.items(), key=lambda x: x[0]))
-    after_sorted = dict(sorted(merged.items(), key=lambda x: x[0]))
-    summary = (
-        f"Will apply tag set with {len(after_sorted)} keys on bucket {bucket}, "
-        "preserving existing tags and ensuring Name and Environment are present."
-    )
-    return {
-        "recommendation_id": rec.id,
-        "recommendation_type": rtype,
-        "risk_level": rec.risk_level,
-        "before": {"bucket": bucket, "tags": before_sorted},
-        "after": {"bucket": bucket, "tags": after_sorted},
-        "impact_summary": summary,
-    }
+    except ClientError as exc:
+        return _dry_run_aws_client_error_result(rec, exc)

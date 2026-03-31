@@ -40,6 +40,7 @@ def test_create_two_step_approve_completes_outcome(client, db, dev_org_scope_adm
         "organization_id": str(org.id),
         "cloud_account_id": str(ca.id),
         "approver_user_ids": [str(ap1.id), str(ap2.id)],
+        "execution_owner_user_id": str(ap1.id),
         "approval_mode": "all_required",
     }
     r = client.post("/api/v1/approval-requests", headers=admin_headers, json=body)
@@ -47,6 +48,7 @@ def test_create_two_step_approve_completes_outcome(client, db, dev_org_scope_adm
     data = r.json()
     assert data["status"] == "submitted"
     assert data["approvals_required"] == 2
+    assert data["execution_owner_user_id"] == str(ap1.id)
     req_id = data["id"]
 
     h1 = {
@@ -85,6 +87,7 @@ def test_reject_stops_flow(client, db, dev_org_scope_admin):
         "organization_id": str(org.id),
         "cloud_account_id": str(ca.id),
         "approver_user_ids": [str(ap1.id), str(ap2.id)],
+        "execution_owner_user_id": str(ap2.id),
     }
     r = client.post("/api/v1/approval-requests", headers=admin_headers, json=body)
     assert r.status_code == 201
@@ -172,3 +175,44 @@ def test_eligible_approvers_legacy_admin_membership_with_viewer_grant(client, db
     row = next((x for x in r.json() if x["email"] == admin_user.email), None)
     assert row is not None, r.json()
     assert row["effective_access_role"] == "admin"
+
+
+def test_create_allows_execution_owner_not_in_selected_approvers(client, db, dev_org_scope_admin):
+    org = dev_org_scope_admin["org"]
+    admin_headers = dev_org_scope_admin["headers"]
+    _t, ca, rec = _seed_rec_for_approval(db, org)
+    ap1 = _add_approver(db, org, "owner-check-a@test.local", "approver")
+    ap2 = _add_approver(db, org, "owner-check-b@test.local", "approver")
+    ap3 = _add_approver(db, org, "owner-check-c@test.local", "approver")
+
+    body = {
+        "recommendation_id": str(rec.id),
+        "organization_id": str(org.id),
+        "cloud_account_id": str(ca.id),
+        "approver_user_ids": [str(ap1.id), str(ap2.id)],
+        "execution_owner_user_id": str(ap3.id),
+        "approval_mode": "all_required",
+    }
+    r = client.post("/api/v1/approval-requests", headers=admin_headers, json=body)
+    assert r.status_code == 201, r.text
+    payload = r.json()
+    assert payload["execution_owner_user_id"] == str(ap3.id)
+
+
+def test_create_requires_execution_owner_field(client, db, dev_org_scope_admin):
+    org = dev_org_scope_admin["org"]
+    admin_headers = dev_org_scope_admin["headers"]
+    _t, ca, rec = _seed_rec_for_approval(db, org)
+    ap1 = _add_approver(db, org, "owner-required@test.local", "approver")
+    ap2 = _add_approver(db, org, "owner-required-2@test.local", "approver")
+
+    body = {
+        "recommendation_id": str(rec.id),
+        "organization_id": str(org.id),
+        "cloud_account_id": str(ca.id),
+        "approver_user_ids": [str(ap1.id), str(ap2.id)],
+        "approval_mode": "all_required",
+    }
+    r = client.post("/api/v1/approval-requests", headers=admin_headers, json=body)
+    assert r.status_code == 422, r.text
+    assert "execution_owner_user_id" in r.text

@@ -40,6 +40,20 @@ class RecommendationExecuteRequest(BaseModel):
     tag_values: dict[str, str] | None = None
 
 
+class RecommendationTagValueEntry(BaseModel):
+    key: str
+    value: str
+
+
+class RecommendationTagValuesSaveRequest(BaseModel):
+    entries: list[RecommendationTagValueEntry] = Field(default_factory=list)
+
+
+class RecommendationTagValuesRead(BaseModel):
+    tag_values: dict[str, str] = Field(default_factory=dict)
+    account_tag_keys: list[str] = Field(default_factory=list)
+
+
 class RecommendationExecuteRead(BaseModel):
     recommendation_id: UUID
     execution_status: Literal["success", "failed"]
@@ -154,6 +168,7 @@ class RecommendationOutcomeRead(BaseModel):
     execution_notes: str | None = None
     preflight_passed_at: datetime | None = None
     applied_via_auto: bool = False
+    tag_values: dict[str, str] | None = None
     notes: str | None
     created_at: datetime
     updated_at: datetime

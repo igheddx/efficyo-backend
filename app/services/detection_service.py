@@ -9,10 +9,11 @@ from uuid import UUID
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
+from app.cost import query_service
 from app.core.db import utc_now
 from app.models.finding import Finding
 from app.models.resource_snapshot import ResourceSnapshot
-from app.services import cloud_account_service, cost_explorer_service
+from app.services import cloud_account_service
 from app.services.pricing_service import estimate_monthly_savings_for_finding
 
 
@@ -706,8 +707,9 @@ def detect_ec2_findings(
         )
     else:
         try:
-            # Reuse the existing EC2-Other cost breakdown logic and extract NAT Gateway spend.
-            ec2_other_breakdown = cost_explorer_service.fetch_ec2_other_breakdown(role_arn=cloud_account.role_arn)
+            ec2_other_breakdown = query_service.get_ec2_other_breakdown(
+                db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id
+            )
             breakdown = ec2_other_breakdown.get("breakdown") or []
             nat_gateway_cost = next(
                 (
@@ -757,7 +759,12 @@ def detect_ec2_findings(
             )
 
         try:
-            waf_cost = cost_explorer_service.fetch_aws_waf_monthly_cost(role_arn=cloud_account.role_arn)
+            summary = query_service.get_summary(db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id)
+            waf_cost = 0.0
+            for item in summary.get("by_service", []):
+                name = (item.get("service") or "").strip()
+                if name == "AWS WAF" or name.startswith("AWS WAF "):
+                    waf_cost += float(item.get("amount", 0.0))
             if waf_cost > 0:
                 existing_waf_finding = (
                     db_session.query(Finding)

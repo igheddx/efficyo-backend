@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.core.cost_window import account_cost_window_label, round_currency_decimal
 from app.core.db import utc_now
+from app.cost import query_service
 from app.models.recommendation import Recommendation
 from app.models.recommendation_outcome import RecommendationOutcome
 from app.models.tenant import Tenant
-from app.services import cloud_account_service, cost_explorer_service
+from app.services import cloud_account_service
 
 
 logger = logging.getLogger(__name__)
@@ -80,9 +81,9 @@ def _rolling_30d_account_total(
     cloud_account_id: UUID,
 ) -> tuple[Decimal | None, str]:
     """(total UnblendedCost for rolling 30d, human-readable window label)."""
-    cloud_account = cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
-    total = cost_explorer_service.rolling_30d_unblended_account_total_decimal(cloud_account.role_arn)
-    return total, account_cost_window_label()
+    cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    summary = query_service.get_summary(db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id)
+    return Decimal(str(summary.get("total_cost", 0.0))), account_cost_window_label()
 
 
 def set_proof_before_cost_if_missing(
@@ -126,12 +127,14 @@ def _baseline_monthly_cost_for_recommendation_type(
     cloud_account_id: UUID,
     recommendation: Recommendation,
 ) -> Optional[Decimal]:
-    cloud_account = cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
     rtype = (recommendation.recommendation_type or "").lower()
 
     if rtype == "nat_gateway_cost_review":
         try:
-            ec2_other = cost_explorer_service.fetch_ec2_other_breakdown(role_arn=cloud_account.role_arn)
+            ec2_other = query_service.get_ec2_other_breakdown(
+                db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id
+            )
             return _nat_gateway_amount_from_ec2_other_breakdown(ec2_other)
         except Exception:
             logger.exception("Failed to fetch NAT Gateway baseline monthly cost")
@@ -139,7 +142,7 @@ def _baseline_monthly_cost_for_recommendation_type(
 
     if rtype == "aurora_serverless_cost_review":
         try:
-            summary = cost_explorer_service.fetch_cost_summary(role_arn=cloud_account.role_arn)
+            summary = query_service.get_summary(db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id)
             # Cost Explorer uses this service label in the current implementation.
             return _service_amount_from_cost_summary(
                 summary,
@@ -164,12 +167,14 @@ def _current_monthly_cost_for_recommendation_type(
     cloud_account_id: UUID,
     outcome: RecommendationOutcome,
 ) -> Optional[Decimal]:
-    cloud_account = cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
     rtype = (outcome.recommendation_type or "").lower()
 
     if rtype == "nat_gateway_cost_review":
         try:
-            ec2_other = cost_explorer_service.fetch_ec2_other_breakdown(role_arn=cloud_account.role_arn)
+            ec2_other = query_service.get_ec2_other_breakdown(
+                db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id
+            )
             return _nat_gateway_amount_from_ec2_other_breakdown(ec2_other)
         except Exception:
             logger.exception("Failed to fetch NAT Gateway current monthly cost")
@@ -177,7 +182,7 @@ def _current_monthly_cost_for_recommendation_type(
 
     if rtype == "aurora_serverless_cost_review":
         try:
-            summary = cost_explorer_service.fetch_cost_summary(role_arn=cloud_account.role_arn)
+            summary = query_service.get_summary(db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id)
             return _service_amount_from_cost_summary(
                 summary,
                 target_service_names=["Amazon Relational Database Service"],
@@ -188,7 +193,7 @@ def _current_monthly_cost_for_recommendation_type(
 
     if rtype == "lambda_rightsize_memory":
         try:
-            summary = cost_explorer_service.fetch_cost_summary(role_arn=cloud_account.role_arn)
+            summary = query_service.get_summary(db_session, tenant_id=tenant_id, cloud_account_id=cloud_account_id)
             direct = _service_amount_from_cost_summary(summary, target_service_names=["AWS Lambda"])
             if direct is not None:
                 return direct
