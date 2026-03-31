@@ -177,6 +177,28 @@ def guided_actions_for_type(recommendation_type: str) -> tuple[list[str], str, s
             "medium",
         )
 
+    if rtype == "cloudfront_review_insecure_protocol_policy":
+        return (
+            [
+                "Open CloudFront distribution behavior settings",
+                "Set viewer protocol policy to redirect HTTP to HTTPS",
+                "Validate origin/app compatibility and deploy",
+            ],
+            "10-20 minutes",
+            "easy",
+        )
+
+    if rtype == "apigateway_public_exposure_review":
+        return (
+            [
+                "Review API auth and authorization model",
+                "Confirm throttling/logging and stage controls",
+                "Validate downstream Lambda/resource permissions",
+            ],
+            "20-40 minutes",
+            "medium",
+        )
+
     return (
         [
             "Review resource configuration",
@@ -244,6 +266,7 @@ def recommendation_read_from_orm(
         applied_by=None,
         applied_at=None,
         execution_notes=None,
+        evidence_json=evidence_json or None,
     )
 
 
@@ -317,6 +340,8 @@ def _recommendation_category_for_type(recommendation_type: str) -> str:
         "s3_enable_public_access_block",
         "s3_enable_versioning",
         "acm_review_certificate_expiry",
+        "cloudfront_review_insecure_protocol_policy",
+        "apigateway_public_exposure_review",
     }:
         return "security"
     return "governance"
@@ -421,6 +446,58 @@ def _build_recommendation_for_finding(
             risk_level="high",
             confidence_score="high",
             recommended_action="Complete DNS validation or re-import; update dependent distributions/endpoints.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "cloudfront_insecure_viewer_protocol_policy":
+        rtype = "cloudfront_review_insecure_protocol_policy"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Harden CloudFront viewer protocol policy",
+            explanation=(
+                "This distribution allows insecure viewer protocol behavior. "
+                "Enforce HTTPS redirect or HTTPS-only for better transport security."
+            ),
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Update default cache behavior viewer protocol policy to redirect HTTP to HTTPS.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "apigateway_public_exposure_review":
+        rtype = "apigateway_public_exposure_review"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review public API exposure and integration posture",
+            explanation=(
+                "This API endpoint is publicly reachable. Validate authentication, throttling, and downstream "
+                "integration exposure before promoting traffic."
+            ),
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Review auth controls, stage settings, and integrated targets for least privilege.",
             estimated_savings=estimated_savings,
             savings_basis=sb,
             confidence_reason=cr,
@@ -747,6 +824,8 @@ _RECOMMENDATION_SOURCE_FINDING_TYPES = (
     "nat_gateway_missing_required_tags",
     "internet_gateway_missing_required_tags",
     "security_group_missing_required_tags",
+    "cloudfront_insecure_viewer_protocol_policy",
+    "apigateway_public_exposure_review",
 )
 
 

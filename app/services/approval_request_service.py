@@ -24,6 +24,7 @@ from app.models.user import User
 from app.services import recommendation_outcome_service
 from app.services import tag_values_service
 from app.services.execution_policy_service import resolve_execution_policy
+from app.services.recommendation_type_utils import is_add_required_tags_recommendation
 
 logger = logging.getLogger(__name__)
 
@@ -334,10 +335,10 @@ def create_approval_request(
         recommendation_type=rec.recommendation_type,
         recommendation_risk_level=rec.risk_level,
     )
-    requires_saved_tags = (
-        (rec.recommendation_type or "").strip().lower() == "s3_add_required_tags"
-        and policy.execution_mode in {"approved_then_manual", "approved_then_auto_allowed"}
-    )
+    requires_saved_tags = is_add_required_tags_recommendation(rec.recommendation_type) and policy.execution_mode in {
+        "approved_then_manual",
+        "approved_then_auto_allowed",
+    }
     if requires_saved_tags and not validated_tag_values:
         raise ValueError("tag_values_required_for_tag_recommendation")
 

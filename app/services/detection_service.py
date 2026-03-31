@@ -394,10 +394,76 @@ def detect_lambda_findings(
         .all()
     )
 
+    # Build latest network/resource maps for linkage evidence.
+    latest_vpc = _latest_snapshot_map_for_type(db_session, tenant_id, cloud_account_id, "vpc")
+    latest_subnet = _latest_snapshot_map_for_type(db_session, tenant_id, cloud_account_id, "subnet")
+    latest_sg = _latest_snapshot_map_for_type(db_session, tenant_id, cloud_account_id, "security_group")
+    latest_api_http = _latest_snapshots_for_type(db_session, tenant_id, cloud_account_id, "apigateway_http_api")
+    api_fronts_lambda: dict[str, list[dict]] = {}
+    for api in latest_api_http:
+        cfg_api = api.configuration_json or {}
+        for arn in cfg_api.get("linked_lambda_arns") or []:
+            api_fronts_lambda.setdefault(str(arn), []).append(
+                {
+                    "resource_type": "apigateway_http_api",
+                    "resource_id": str(api.resource_id),
+                    "resource_name": str(cfg_api.get("name") or api.resource_id),
+                    "relation": "fronted_by_apigateway",
+                    "confidence": "direct_integration_uri",
+                    "source": "apigatewayv2.get_integrations",
+                }
+            )
+
     findings: list[Finding] = []
     for snapshot in snapshots:
         tags = snapshot.tags_json or {}
         missing_tags = _missing_required_tags(tags)
+        configuration = snapshot.configuration_json or {}
+        arn = str(configuration.get("function_arn") or "").strip()
+        vpc_cfg = configuration.get("vpc_config") or {}
+        vpc_id = str(vpc_cfg.get("vpc_id") or "").strip()
+        subnet_ids = [str(x) for x in (vpc_cfg.get("subnet_ids") or []) if x]
+        sg_ids = [str(x) for x in (vpc_cfg.get("security_group_ids") or []) if x]
+        linked_resources: list[dict] = []
+        if vpc_id:
+            vpc_snap = latest_vpc.get(vpc_id)
+            if vpc_snap is not None:
+                linked_resources.append(
+                    {
+                        "resource_type": "vpc",
+                        "resource_id": vpc_id,
+                        "resource_name": str((vpc_snap.configuration_json or {}).get("cidr_block") or vpc_id),
+                        "relation": "attached_vpc",
+                        "confidence": "direct_config",
+                        "source": "lambda.vpc_config",
+                    }
+                )
+        for sid in subnet_ids:
+            if sid in latest_subnet:
+                linked_resources.append(
+                    {
+                        "resource_type": "subnet",
+                        "resource_id": sid,
+                        "resource_name": str((latest_subnet[sid].configuration_json or {}).get("cidr_block") or sid),
+                        "relation": "attached_subnet",
+                        "confidence": "direct_config",
+                        "source": "lambda.vpc_config",
+                    }
+                )
+        for sgid in sg_ids:
+            if sgid in latest_sg:
+                linked_resources.append(
+                    {
+                        "resource_type": "security_group",
+                        "resource_id": sgid,
+                        "resource_name": str((latest_sg[sgid].configuration_json or {}).get("group_name") or sgid),
+                        "relation": "attached_security_group",
+                        "confidence": "direct_config",
+                        "source": "lambda.vpc_config",
+                    }
+                )
+        for lr in api_fronts_lambda.get(arn, []):
+            linked_resources.append(dict(lr))
         if missing_tags:
             findings.append(
                 Finding(
@@ -408,13 +474,16 @@ def detect_lambda_findings(
                     resource_type=snapshot.resource_type,
                     finding_type="lambda_missing_required_tags",
                     severity="medium",
-                    evidence_json={"missing_tags": missing_tags, "tags": tags},
+                    evidence_json={
+                        "missing_tags": missing_tags,
+                        "tags": tags,
+                        "vpc_link_status": _vpc_link_status(vpc_id, subnet_ids, sg_ids, linked_resources),
+                        "linked_resources": linked_resources,
+                    },
                     detected_at=detected_at,
                     sync_run_id=sync_run_id,
                 )
             )
-
-        configuration = snapshot.configuration_json or {}
         memory_size = configuration.get("memory_size")
         if isinstance(memory_size, (int, float)) and memory_size >= 1024:
             findings.append(
@@ -426,7 +495,11 @@ def detect_lambda_findings(
                     resource_type=snapshot.resource_type,
                     finding_type="lambda_high_memory_configuration_candidate",
                     severity="medium",
-                    evidence_json={"memory_size": memory_size},
+                    evidence_json={
+                        "memory_size": memory_size,
+                        "vpc_link_status": _vpc_link_status(vpc_id, subnet_ids, sg_ids, linked_resources),
+                        "linked_resources": linked_resources,
+                    },
                     estimated_savings=10,
                     detected_at=detected_at,
                     sync_run_id=sync_run_id,
@@ -444,6 +517,52 @@ def detect_lambda_findings(
         detected_at=detected_at,
         sync_run_id=sync_run_id,
     )
+
+
+def _latest_snapshots_for_type(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    resource_type: str,
+) -> list[ResourceSnapshot]:
+    latest = (
+        db_session.query(func.max(ResourceSnapshot.captured_at))
+        .filter(
+            ResourceSnapshot.tenant_id == tenant_id,
+            ResourceSnapshot.cloud_account_id == cloud_account_id,
+            ResourceSnapshot.resource_type == resource_type,
+        )
+        .scalar()
+    )
+    if latest is None:
+        return []
+    return (
+        db_session.query(ResourceSnapshot)
+        .filter(
+            ResourceSnapshot.tenant_id == tenant_id,
+            ResourceSnapshot.cloud_account_id == cloud_account_id,
+            ResourceSnapshot.resource_type == resource_type,
+            ResourceSnapshot.captured_at == latest,
+        )
+        .all()
+    )
+
+
+def _latest_snapshot_map_for_type(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    resource_type: str,
+) -> dict[str, ResourceSnapshot]:
+    rows = _latest_snapshots_for_type(db_session, tenant_id, cloud_account_id, resource_type)
+    return {str(r.resource_id): r for r in rows}
+
+
+def _vpc_link_status(vpc_id: str, subnet_ids: list[str], sg_ids: list[str], linked_resources: list[dict]) -> str:
+    if not vpc_id:
+        return "not_attached"
+    expected = 1 + len(subnet_ids) + len(sg_ids)
+    return "attached_and_linked" if len(linked_resources) >= expected else "attached_missing_snapshots"
 
 
 def detect_s3_findings(

@@ -410,11 +410,26 @@ def _normalize_aurora_cluster(db_cluster: dict, region: str, tags: dict | None =
 
 def _normalize_lambda_function(function: dict, region: str, tags: dict | None = None) -> dict:
     """Normalize a Lambda function to snapshot format."""
+    vpc_cfg = function.get("VpcConfig") or {}
+    subnet_ids = [str(x) for x in (vpc_cfg.get("SubnetIds") or []) if x]
+    security_group_ids = [str(x) for x in (vpc_cfg.get("SecurityGroupIds") or []) if x]
+    vpc_id = str(vpc_cfg.get("VpcId") or "") or None
     configuration = {
         "runtime": function.get("Runtime", ""),
         "memory_size": function.get("MemorySize"),
         "timeout": function.get("Timeout"),
         "last_modified": function.get("LastModified", ""),
+        "function_arn": function.get("FunctionArn", ""),
+        "vpc_config": {
+            "vpc_id": vpc_id,
+            "subnet_ids": subnet_ids,
+            "security_group_ids": security_group_ids,
+        },
+        "linked_vpc_id": vpc_id,
+        "linked_subnet_ids": subnet_ids,
+        "linked_security_group_ids": security_group_ids,
+        "vpc_link_status": "attached" if vpc_id else "not_attached",
+        "linked_resources": [],
     }
 
     return {

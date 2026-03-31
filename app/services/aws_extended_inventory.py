@@ -29,6 +29,42 @@ _SKIPPABLE = frozenset({"UnauthorizedOperation", "AuthFailure", "AccessDenied", 
 _MAX_SECURITY_GROUPS_PER_REGION = 2000
 
 
+def _linked_resource_ref(
+    *,
+    resource_type: str,
+    resource_id: str,
+    resource_name: str | None,
+    relation: str,
+    confidence: str,
+    source: str,
+) -> dict[str, str]:
+    return {
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "resource_name": resource_name or "",
+        "relation": relation,
+        "confidence": confidence,
+        "source": source,
+    }
+
+
+def _lambda_arn_from_integration_uri(uri: str) -> str | None:
+    """
+    Extract Lambda function ARN from API Gateway integration URI.
+
+    Expected shape often contains: ``.../functions/<lambda-arn>/invocations``.
+    Returns None when URI does not clearly reference Lambda.
+    """
+    u = str(uri or "")
+    if ":lambda:" not in u or ":function:" not in u:
+        return None
+    if "/functions/" in u:
+        u = u.split("/functions/", 1)[1]
+    u = u.split("/invocations", 1)[0]
+    u = u.strip()
+    return u or None
+
+
 def _safe_list_tags_cloudfront(cf_client, arn: str) -> dict[str, str]:
     try:
         r = cf_client.list_tags_for_resource(Resource=arn)
@@ -68,6 +104,13 @@ def fetch_cloudfront_distributions(role_arn: str, home_region: str) -> list[dict
                     "status": d.get("Status"),
                     "aliases": aliases.get("Items", []) if isinstance(aliases, dict) else [],
                     "viewer_protocol_policy": (d.get("DefaultCacheBehavior") or {}).get("ViewerProtocolPolicy"),
+                    "distribution_arn": arn,
+                    "viewer_certificate_iam_certificate_id": (d.get("ViewerCertificate") or {}).get("IAMCertificateId"),
+                    "viewer_certificate_acm_arn": (d.get("ViewerCertificate") or {}).get("ACMCertificateArn"),
+                    "viewer_certificate_minimum_protocol_version": (d.get("ViewerCertificate") or {}).get(
+                        "MinimumProtocolVersion"
+                    ),
+                    "linked_resources": [],
                 }
                 out.append(
                     {
@@ -112,11 +155,14 @@ def _acm_one_region(role_arn: str, region: str) -> list[dict]:
                 pass
             cfg = {
                 "domain_name": detail.get("DomainName"),
+                "subject_alternative_names": detail.get("SubjectAlternativeNames") or [],
                 "status": detail.get("Status") or summary.get("Status"),
                 "type": detail.get("Type"),
                 "in_use": detail.get("InUse"),
                 "key_algorithm": detail.get("KeyAlgorithm"),
                 "not_after": na_iso,
+                "not_before": detail.get("NotBefore").isoformat() if isinstance(detail.get("NotBefore"), datetime) else None,
+                "linked_resources": [],
             }
             out.append(
                 {
@@ -199,7 +245,42 @@ def _apigw_http_one_region(role_arn: str, region: str) -> list[dict]:
             "name": api.get("Name"),
             "protocol_type": api.get("ProtocolType"),
             "api_endpoint": api.get("ApiEndpoint"),
+            "linked_lambda_arns": [],
+            "linked_lambda_names": [],
+            "integration_type": "unknown",
+            "integration_source": "apigatewayv2.get_integrations",
+            "linked_resources": [],
         }
+        integration_lambda_arns: list[str] = []
+        integration_types: set[str] = set()
+        try:
+            ir = client.get_integrations(ApiId=aid)
+            for integ in ir.get("Items", []) or []:
+                itype = str(integ.get("IntegrationType") or "")
+                if itype:
+                    integration_types.add(itype)
+                arn = _lambda_arn_from_integration_uri(str(integ.get("IntegrationUri") or ""))
+                if arn and arn not in integration_lambda_arns:
+                    integration_lambda_arns.append(arn)
+        except (ClientError, BotoCoreError):
+            pass
+        if integration_lambda_arns:
+            cfg["integration_type"] = "lambda_proxy_or_lambda"
+            cfg["linked_lambda_arns"] = integration_lambda_arns
+            cfg["linked_lambda_names"] = [a.rsplit(":", 1)[-1] for a in integration_lambda_arns]
+            cfg["linked_resources"] = [
+                _linked_resource_ref(
+                    resource_type="lambda_function",
+                    resource_id=arn,
+                    resource_name=arn.rsplit(":", 1)[-1],
+                    relation="fronts_lambda",
+                    confidence="direct_integration_uri",
+                    source="apigatewayv2.get_integrations",
+                )
+                for arn in integration_lambda_arns
+            ]
+        elif integration_types:
+            cfg["integration_type"] = ",".join(sorted(integration_types))
         out.append(
             {
                 "resource_id": aid,
@@ -440,16 +521,92 @@ def fetch_security_groups(role_arn: str, home_region: str) -> list[dict]:
 
 def fetch_all_extended(role_arn: str, home_region: str) -> dict[str, list[dict]]:
     """Return keyed batches for observability (each value is a list of snapshot dicts)."""
-    return {
+    batches = {
         "cloudfront_distribution": fetch_cloudfront_distributions(role_arn, home_region),
         "acm_certificate": fetch_acm_certificates(role_arn, home_region),
         "apigateway_rest_api": fetch_apigateway_rest_apis(role_arn, home_region),
         "apigateway_http_api": fetch_apigateway_http_apis(role_arn, home_region),
         "eventbridge_rule": fetch_eventbridge_rules(role_arn, home_region),
-        "ses_email_identity": fetch_ses_identities(role_arn, home_region),
+        "ses_email_identity": fetch_ses_email_identities(role_arn, home_region),
         "vpc": fetch_vpcs(role_arn, home_region),
         "subnet": fetch_subnets(role_arn, home_region),
         "nat_gateway": fetch_nat_gateways(role_arn, home_region),
         "internet_gateway": fetch_internet_gateways(role_arn, home_region),
         "security_group": fetch_security_groups(role_arn, home_region),
     }
+    _link_cloudfront_to_acm(batches)
+    return batches
+
+
+def _link_cloudfront_to_acm(batches: dict[str, list[dict]]) -> None:
+    cloudfront_rows = batches.get("cloudfront_distribution") or []
+    acm_rows = batches.get("acm_certificate") or []
+    if not cloudfront_rows or not acm_rows:
+        return
+    acm_by_arn: dict[str, dict] = {}
+    acm_domains: dict[str, list[dict]] = {}
+    for row in acm_rows:
+        rid = str(row.get("resource_id") or "")
+        cfg = row.get("configuration_json") or {}
+        if rid:
+            acm_by_arn[rid] = row
+        for dom in [cfg.get("domain_name"), *(cfg.get("subject_alternative_names") or [])]:
+            d = str(dom or "").strip().lower()
+            if d:
+                acm_domains.setdefault(d, []).append(row)
+    for cf in cloudfront_rows:
+        cfg = cf.get("configuration_json") or {}
+        linked: list[dict] = list(cfg.get("linked_resources") or [])
+        arn = str(cfg.get("viewer_certificate_acm_arn") or "").strip()
+        matched: dict | None = acm_by_arn.get(arn) if arn else None
+        confidence = "unknown"
+        source = "none"
+        if matched is not None:
+            confidence = "direct_arn_match"
+            source = "cloudfront.viewer_certificate.acm_arn"
+        else:
+            candidates: list[dict] = []
+            for d in [cfg.get("domain_name"), *(cfg.get("aliases") or [])]:
+                key = str(d or "").strip().lower()
+                if not key:
+                    continue
+                candidates.extend(acm_domains.get(key, []))
+            # high-confidence fallback only when exactly one unique certificate matches domains/aliases
+            uniq = {str(x.get("resource_id")): x for x in candidates}
+            if len(uniq) == 1:
+                matched = next(iter(uniq.values()))
+                confidence = "domain_match"
+                source = "cloudfront.domain_or_alias_to_acm_domain"
+        if matched is not None:
+            mcfg = matched.get("configuration_json") or {}
+            cfg["linked_acm_certificate_arn"] = str(matched.get("resource_id") or "")
+            cfg["linked_acm_certificate_domain"] = str(mcfg.get("domain_name") or "")
+            cfg["linked_acm_certificate_status"] = str(mcfg.get("status") or "")
+            cfg["link_confidence"] = confidence
+            linked.append(
+                _linked_resource_ref(
+                    resource_type="acm_certificate",
+                    resource_id=cfg["linked_acm_certificate_arn"],
+                    resource_name=cfg["linked_acm_certificate_domain"] or cfg["linked_acm_certificate_arn"],
+                    relation="uses_certificate",
+                    confidence=confidence,
+                    source=source,
+                )
+            )
+            # reverse "used_by_distribution" on ACM snapshot
+            rev_cfg = matched.setdefault("configuration_json", {})
+            rev_links = list(rev_cfg.get("linked_resources") or [])
+            rev_links.append(
+                _linked_resource_ref(
+                    resource_type="cloudfront_distribution",
+                    resource_id=str(cf.get("resource_id") or ""),
+                    resource_name=str(cfg.get("domain_name") or ""),
+                    relation="used_by_distribution",
+                    confidence=confidence,
+                    source=source,
+                )
+            )
+            rev_cfg["linked_resources"] = rev_links
+        else:
+            cfg["link_confidence"] = "unknown"
+        cfg["linked_resources"] = linked

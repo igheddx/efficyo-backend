@@ -77,6 +77,7 @@ from app.services import (
     trend_service,
     insight_narration_service,
 )
+from app.services.recommendation_type_utils import is_add_required_tags_recommendation
 
 
 def require_org_scoped_cloud_tenant(
@@ -1676,7 +1677,7 @@ def get_recommendation_tag_values_endpoint(
     )
     if rec is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation not found")
-    if (rec.recommendation_type or "").strip().lower() != "s3_add_required_tags":
+    if not is_add_required_tags_recommendation(rec.recommendation_type):
         return RecommendationTagValuesRead(tag_values={}, account_tag_keys=[])
     outcome = recommendation_outcome_service.create_outcome_for_recommendation(
         db_session=db_session,
@@ -1715,7 +1716,7 @@ def save_recommendation_tag_values_endpoint(
     )
     if rec is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation not found")
-    if (rec.recommendation_type or "").strip().lower() != "s3_add_required_tags":
+    if not is_add_required_tags_recommendation(rec.recommendation_type):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Tag values are only supported for tag recommendations.")
     try:
         values = tag_values_service.validate_tag_entries([x.model_dump() for x in body.entries])

@@ -183,6 +183,7 @@ class RecommendationRead(BaseModel):
     applied_role: str | None = None
     applied_at: datetime | None = None
     execution_notes: str | None = None
+    evidence_json: dict | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
