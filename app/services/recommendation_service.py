@@ -188,12 +188,144 @@ def guided_actions_for_type(recommendation_type: str) -> tuple[list[str], str, s
             "easy",
         )
 
+    if rtype == "cloudfront_enforce_https_redirect":
+        return (
+            [
+                "Review CloudFront default and ordered cache behaviors",
+                "Set viewer protocol policy to redirect HTTP to HTTPS",
+                "Re-test all public paths and API endpoints over HTTPS",
+            ],
+            "10-20 minutes",
+            "easy",
+        )
+
+    if rtype == "cloudfront_review_disabled_distribution":
+        return (
+            [
+                "Confirm whether the distribution should remain disabled",
+                "Check dependent DNS records and certificate validity",
+                "Enable only when traffic and origin posture are validated",
+            ],
+            "10-20 minutes",
+            "easy",
+        )
+
     if rtype == "apigateway_public_exposure_review":
         return (
             [
                 "Review API auth and authorization model",
                 "Confirm throttling/logging and stage controls",
                 "Validate downstream Lambda/resource permissions",
+            ],
+            "20-40 minutes",
+            "medium",
+        )
+
+    if rtype == "eventbridge_add_targets_or_cleanup":
+        return (
+            [
+                "Verify whether the rule is expected to trigger workloads",
+                "Attach the intended targets or remove stale rule definitions",
+                "Re-run a test event to confirm target delivery",
+            ],
+            "15-30 minutes",
+            "medium",
+        )
+
+    if rtype == "eventbridge_review_disabled_rule":
+        return (
+            [
+                "Confirm whether the disabled rule is intentionally paused",
+                "Re-enable the rule if it should be active",
+                "Document owner and expected schedule/event pattern",
+            ],
+            "10-20 minutes",
+            "easy",
+        )
+
+    if rtype == "lambda_update_runtime":
+        return (
+            [
+                "Identify supported target runtime for the function",
+                "Run tests against the updated runtime in non-production",
+                "Deploy runtime update and monitor cold starts/errors",
+            ],
+            "30-60 minutes",
+            "medium",
+        )
+
+    if rtype == "lambda_review_timeout_configuration":
+        return (
+            [
+                "Review invocation duration and timeout failures in CloudWatch",
+                "Tune timeout to match expected execution profile",
+                "Add retries/dead-letter handling if long-running paths remain",
+            ],
+            "20-40 minutes",
+            "medium",
+        )
+
+    if rtype == "acm_complete_validation":
+        return (
+            [
+                "Review ACM validation method and pending records",
+                "Create or correct DNS/email validation records",
+                "Confirm certificate reaches ISSUED before cutover deadlines",
+            ],
+            "20-40 minutes",
+            "medium",
+        )
+
+    if rtype == "acm_investigate_validation_failure":
+        return (
+            [
+                "Inspect ACM status and validation failure reason",
+                "Re-request or re-import certificate with correct domains",
+                "Update dependent services after certificate remediation",
+            ],
+            "30-60 minutes",
+            "medium",
+        )
+
+    if rtype == "ses_fix_identity_verification":
+        return (
+            [
+                "Open SES identity settings and confirm verification type",
+                "Add or repair DNS verification records",
+                "Verify identity status transitions to SUCCESS",
+            ],
+            "15-30 minutes",
+            "easy",
+        )
+
+    if rtype == "ses_review_sending_configuration":
+        return (
+            [
+                "Check why sending is disabled for the identity",
+                "Review account-level SES sending limits and suppression posture",
+                "Enable sending only when controls are validated",
+            ],
+            "15-30 minutes",
+            "medium",
+        )
+
+    if rtype == "security_group_restrict_world_open_ports":
+        return (
+            [
+                "Identify required source CIDRs for admin/application access",
+                "Replace 0.0.0.0/0 or ::/0 ingress with least-privilege ranges",
+                "Validate connectivity after rule updates",
+            ],
+            "20-40 minutes",
+            "medium",
+        )
+
+    if rtype == "security_group_restrict_ingress":
+        return (
+            [
+                "Review current ingress rules and remove stale entries",
+                "Consolidate to minimal required ports/protocols",
+                "Record ownership and intended exposure per rule",
             ],
             "20-40 minutes",
             "medium",
@@ -341,7 +473,19 @@ def _recommendation_category_for_type(recommendation_type: str) -> str:
         "s3_enable_versioning",
         "acm_review_certificate_expiry",
         "cloudfront_review_insecure_protocol_policy",
+        "cloudfront_enforce_https_redirect",
+        "cloudfront_review_disabled_distribution",
         "apigateway_public_exposure_review",
+        "acm_complete_validation",
+        "acm_investigate_validation_failure",
+        "lambda_update_runtime",
+        "lambda_review_timeout_configuration",
+        "ses_fix_identity_verification",
+        "ses_review_sending_configuration",
+        "security_group_restrict_world_open_ports",
+        "security_group_restrict_ingress",
+        "eventbridge_add_targets_or_cleanup",
+        "eventbridge_review_disabled_rule",
     }:
         return "security"
     return "governance"
@@ -478,6 +622,58 @@ def _build_recommendation_for_finding(
             created_at=created_at,
         )
 
+    if finding.finding_type == "cloudfront_missing_https_redirect":
+        rtype = "cloudfront_enforce_https_redirect"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Enforce HTTPS redirect on CloudFront viewer paths",
+            explanation=(
+                "This distribution is not configured to redirect all viewer HTTP requests to HTTPS. "
+                "Redirecting to HTTPS reduces accidental clear-text traffic."
+            ),
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Set CloudFront viewer protocol policy to redirect-to-https on active behaviors.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "cloudfront_disabled_distribution_review":
+        rtype = "cloudfront_review_disabled_distribution"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review disabled CloudFront distribution state",
+            explanation=(
+                "This distribution is currently disabled. Confirm whether this is intentional or if "
+                "traffic should be restored after validating origin and certificate posture."
+            ),
+            risk_level="low",
+            confidence_score="medium",
+            recommended_action="Validate ownership and enable only if this distribution is still in service.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
     if finding.finding_type == "apigateway_public_exposure_review":
         rtype = "apigateway_public_exposure_review"
         rcat = _recommendation_category_for_type(rtype)
@@ -498,6 +694,242 @@ def _build_recommendation_for_finding(
             risk_level="medium",
             confidence_score="medium",
             recommended_action="Review auth controls, stage settings, and integrated targets for least privilege.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "eventbridge_rule_without_targets":
+        rtype = "eventbridge_add_targets_or_cleanup"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Attach EventBridge targets or remove stale rule",
+            explanation=(
+                "This EventBridge rule currently has no targets. Validate intended behavior and either "
+                "attach a destination or remove unused automation."
+            ),
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Add valid targets to the rule, or retire it if no longer required.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "eventbridge_rule_disabled_review":
+        rtype = "eventbridge_review_disabled_rule"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review disabled EventBridge rule",
+            explanation="This rule is disabled. Confirm whether the disabled state is intentional and still valid.",
+            risk_level="low",
+            confidence_score="high",
+            recommended_action="Enable the rule if active event automation is expected; otherwise document and keep disabled.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "acm_certificate_pending_validation":
+        rtype = "acm_complete_validation"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Complete ACM certificate validation",
+            explanation="This ACM certificate is pending validation and may not be usable for dependent endpoints yet.",
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Complete DNS/email validation so the certificate can transition to ISSUED.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "acm_certificate_validation_issue":
+        rtype = "acm_investigate_validation_failure"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Investigate ACM certificate validation failure",
+            explanation="This ACM certificate is in a failed validation state and may break TLS dependencies.",
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Review failure reason, correct validation inputs, and re-issue or replace the certificate.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "ses_identity_unverified":
+        rtype = "ses_fix_identity_verification"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Verify SES identity",
+            explanation="This SES identity is not fully verified and may not be eligible for reliable sending.",
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Complete SES identity verification (DNS/email) and re-check sending readiness.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "ses_sending_disabled_identity":
+        rtype = "ses_review_sending_configuration"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review SES identity sending configuration",
+            explanation="This SES identity has sending disabled and should be reviewed for expected mail flow readiness.",
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Validate SES account/identity settings and re-enable sending if this identity should be active.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "security_group_world_open_sensitive_port":
+        rtype = "security_group_restrict_world_open_ports"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Restrict world-open sensitive security group ports",
+            explanation=(
+                "This security group exposes sensitive ports to the public internet. "
+                "Restrict ingress to known source CIDRs to reduce attack surface."
+            ),
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Remove 0.0.0.0/0 or ::/0 access for SSH/RDP/all-ports unless explicitly required.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "security_group_overly_permissive":
+        rtype = "security_group_restrict_ingress"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review and restrict broad security group ingress rules",
+            explanation="This security group has a high count of ingress rules and should be reviewed for least privilege.",
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Prune stale ingress rules and scope remaining access to required ports and CIDRs only.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "lambda_outdated_runtime":
+        rtype = "lambda_update_runtime"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Update Lambda runtime from deprecated version",
+            explanation="This Lambda function uses an outdated runtime that should be upgraded to a supported version.",
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Test and deploy a supported runtime version for this function.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "lambda_review_timeout_configuration":
+        rtype = "lambda_review_timeout_configuration"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review Lambda timeout configuration",
+            explanation="This Lambda function has a high timeout configuration and should be validated against execution patterns.",
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Validate function timeout against actual duration and retry/error-handling behavior.",
             estimated_savings=estimated_savings,
             savings_basis=sb,
             confidence_reason=cr,
@@ -825,7 +1257,19 @@ _RECOMMENDATION_SOURCE_FINDING_TYPES = (
     "internet_gateway_missing_required_tags",
     "security_group_missing_required_tags",
     "cloudfront_insecure_viewer_protocol_policy",
+    "cloudfront_missing_https_redirect",
+    "cloudfront_disabled_distribution_review",
     "apigateway_public_exposure_review",
+    "eventbridge_rule_without_targets",
+    "eventbridge_rule_disabled_review",
+    "acm_certificate_pending_validation",
+    "acm_certificate_validation_issue",
+    "ses_identity_unverified",
+    "ses_sending_disabled_identity",
+    "security_group_world_open_sensitive_port",
+    "security_group_overly_permissive",
+    "lambda_outdated_runtime",
+    "lambda_review_timeout_configuration",
 )
 
 
