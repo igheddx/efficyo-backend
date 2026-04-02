@@ -33,6 +33,7 @@ def db() -> Generator[Session, None, None]:
     """Create a fresh database for each test."""
     from app.core.db import Base
     from app.models.organization import Organization  # noqa: F401
+    from app.models.platform_setting import PlatformSetting  # noqa: F401
     from app.models.user import AuthSession, User  # noqa: F401
     from app.models.cloud_account import CloudAccount  # noqa: F401
     from app.models.finding import Finding  # noqa: F401

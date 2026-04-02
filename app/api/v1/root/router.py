@@ -11,6 +11,7 @@ from app.core.user_context import UserContext
 from app.schemas.organization import OrgMembershipRead
 from app.schemas.root.common import Paginated
 from app.schemas.root.dashboard import RootDashboardSummary
+from app.schemas.root.ops import RootAlertThresholds, RootAlertThresholdsPatch
 from app.schemas.root.orgs import (
     RootOrganizationCreate,
     RootOrganizationDetail,
@@ -24,7 +25,7 @@ from app.schemas.root.users import (
     RootUserStatusUpdate,
 )
 from app.services import org_service
-from app.services.root import dashboard_service, orgs_service, users_service
+from app.services.root import dashboard_service, ops_service, orgs_service, users_service
 
 router = APIRouter(prefix="/root", tags=["root-admin"])
 
@@ -51,6 +52,43 @@ def root_dashboard(
     _ctx: UserContext = Depends(require_platform_root),
 ) -> RootDashboardSummary:
     return RootDashboardSummary.model_validate(dashboard_service.root_dashboard_summary(db_session))
+
+
+@router.get("/alerts/thresholds", response_model=RootAlertThresholds)
+def root_get_alert_thresholds(
+    db_session: Session = Depends(get_db),
+    _ctx: UserContext = Depends(require_platform_root),
+) -> RootAlertThresholds:
+    thresholds, row = ops_service.get_alert_thresholds(db_session)
+    return RootAlertThresholds(
+        **thresholds,
+        updated_at=getattr(row, "updated_at", None),
+        updated_by_email=getattr(row, "updated_by_email", None),
+    )
+
+
+@router.patch("/alerts/thresholds", response_model=RootAlertThresholds)
+def root_patch_alert_thresholds(
+    body: RootAlertThresholdsPatch,
+    db_session: Session = Depends(get_db),
+    ctx: UserContext = Depends(require_platform_root),
+) -> RootAlertThresholds:
+    try:
+        thresholds, row = ops_service.patch_alert_thresholds(
+            db_session,
+            patch=body.model_dump(exclude_unset=True),
+            updated_by_email=ctx.email,
+        )
+    except ValueError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    return RootAlertThresholds(
+        **thresholds,
+        updated_at=row.updated_at,
+        updated_by_email=row.updated_by_email,
+    )
 
 
 @router.get("/organizations", response_model=Paginated[RootOrganizationListItem])
