@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: meezi-prod-db
+    environment:
+      POSTGRES_USER: optimizer
+      POSTGRES_PASSWORD: optimizer
+      POSTGRES_DB: optimizer_db
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U optimizer -d optimizer_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: /opt/meezi/efficyo-backend
+      dockerfile: /opt/meezi/Dockerfile.backend
+    image: meezi-backend:prod
+    container_name: meezi-prod-api
+    env_file: /opt/meezi/.env.backend
+    command: ["sh", "/app/scripts/run_api.sh"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - /var/log/meezi:/var/log/meezi
+      - /opt/meezi/runtime:/app/runtime
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: always
+
+  worker:
+    image: meezi-backend:prod
+    container_name: meezi-prod-worker
+    env_file: /opt/meezi/.env.backend
+    environment:
+      - PYTHONPATH=/app
+      - MEEZI_WORKER_HEARTBEAT_PATH=/app/runtime/worker-heartbeat.json
+    volumes:
+      - /opt/meezi/worker_entrypoint.py:/app/worker_entrypoint.py:ro
+      - /var/log/meezi:/var/log/meezi
+      - /opt/meezi/runtime:/app/runtime
+    command: ["sh", "/app/scripts/run_worker.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: always
+
+volumes:
+  pgdata_prod:
