@@ -6,6 +6,10 @@ from pydantic import BaseModel, Field
 
 class TenantCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
+    organization_id: UUID | None = Field(
+        default=None,
+        description="Platform administrators only: create the customer under this organization.",
+    )
 
 
 class TenantRead(BaseModel):

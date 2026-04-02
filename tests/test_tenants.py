@@ -87,6 +87,31 @@ class TestTenantAPI:
         assert data["status"] == "active"
         assert isinstance(data["id"], str)  # UUID as string
 
+    def test_post_tenants_with_organization_id_platform_root(self, client, dev_org_scope):
+        """Platform root can create a customer under a specific org without session org."""
+        org = dev_org_scope["org"]
+        h = {"X-User": "root", "X-Role": "root_admin"}
+        response = client.post(
+            "/api/v1/tenants",
+            json={"name": "customer-by-root", "organization_id": str(org.id)},
+            headers=h,
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "customer-by-root"
+        assert data["organization_id"] == str(org.id)
+
+    def test_post_tenants_rejects_organization_id_for_non_root(self, client, dev_org_scope):
+        """Non–platform-root callers cannot set organization_id on create."""
+        h = dev_org_scope["headers"]
+        response = client.post(
+            "/api/v1/tenants",
+            json={"name": "should-fail", "organization_id": str(dev_org_scope["org"].id)},
+            headers=h,
+        )
+        assert response.status_code == 403
+        assert "platform" in response.json()["detail"].lower()
+
     def test_post_tenants_duplicate_name_conflict(self, client, dev_org_scope):
         """POST /api/v1/tenants with duplicate name should return 409."""
         h = dev_org_scope["headers"]

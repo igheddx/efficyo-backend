@@ -24,8 +24,17 @@ def create_tenant_endpoint(
     db_session: Session = Depends(get_db),
     ctx: UserContext = Depends(get_user_context),
 ) -> TenantRead:
-    org_id = tenant_scope_service.require_data_access_organization_id(db_session, ctx)
     tenant_scope_service.require_tenant_write_role(ctx)
+    if body.organization_id is not None:
+        if not ctx.is_platform_root:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only platform administrators can set organization_id when creating a customer.",
+            )
+        tenant_scope_service.assert_organization_accessible(db_session, ctx, body.organization_id)
+        org_id = body.organization_id
+    else:
+        org_id = tenant_scope_service.require_data_access_organization_id(db_session, ctx)
     try:
         tenant = tenant_service.create_tenant(db_session, body.name, organization_id=org_id)
         return TenantRead.model_validate(tenant)

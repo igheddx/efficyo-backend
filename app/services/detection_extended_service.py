@@ -1,4 +1,4 @@
-"""Extended governance/security findings for CloudFront, ACM, API Gateway, EventBridge, SES, and VPC networking."""
+"""Extended governance/security findings for CloudFront, ACM, API Gateway, EventBridge, SES, Lambda, and VPC networking."""
 
 from __future__ import annotations
 
@@ -64,13 +64,33 @@ def _latest_snapshots(
     )
 
 
+_OUTDATED_LAMBDA_RUNTIME_PREFIXES = (
+    "python2.",
+    "python3.6",
+    "python3.7",
+    "python3.8",
+    "nodejs10",
+    "nodejs12",
+    "nodejs14",
+    "dotnetcore2.",
+    "dotnetcore3.",
+    "ruby2.",
+    "java8",
+)
+
+
+def _is_outdated_lambda_runtime(runtime: str | None) -> bool:
+    rt = str(runtime or "").strip().lower()
+    return bool(rt) and any(rt.startswith(prefix) for prefix in _OUTDATED_LAMBDA_RUNTIME_PREFIXES)
+
+
 def detect_extended_findings(
     db_session: Session,
     tenant_id: UUID,
     cloud_account_id: UUID,
     sync_run_id: UUID,
 ) -> DetectionRunResult:
-    """Governance (required tags) and ACM expiry signals for extended inventory types."""
+    """Emit extended governance/security findings from latest snapshots."""
     cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
     detected_at = utc_now()
     findings: list[Finding] = []
@@ -197,6 +217,84 @@ def detect_extended_findings(
                     sync_run_id=sync_run_id,
                 )
             )
+        if viewer_policy and viewer_policy != "redirect-to-https":
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="cloudfront_missing_https_redirect",
+                    severity="medium",
+                    evidence_json={
+                        "viewer_protocol_policy": viewer_policy,
+                        "linked_resources": linked,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+        if cfg.get("enabled") is False:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="cloudfront_disabled_distribution_review",
+                    severity="low",
+                    evidence_json={
+                        "enabled": False,
+                        "status": cfg.get("status"),
+                        "linked_resources": linked,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "security_group"):
+        cfg = snapshot.configuration_json or {}
+        has_open_sensitive = bool(
+            cfg.get("has_world_open_ssh") or cfg.get("has_world_open_rdp") or cfg.get("has_world_open_all_ports")
+        )
+        if has_open_sensitive:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="security_group_world_open_sensitive_port",
+                    severity="high",
+                    evidence_json={
+                        "has_world_open_ssh": bool(cfg.get("has_world_open_ssh")),
+                        "has_world_open_rdp": bool(cfg.get("has_world_open_rdp")),
+                        "has_world_open_all_ports": bool(cfg.get("has_world_open_all_ports")),
+                        "ingress_rule_count": int(cfg.get("ingress_rule_count") or 0),
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+        elif int(cfg.get("ingress_rule_count") or 0) >= 8:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="security_group_overly_permissive",
+                    severity="medium",
+                    evidence_json={"ingress_rule_count": int(cfg.get("ingress_rule_count") or 0)},
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
 
     for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "apigateway_http_api"):
         cfg = snapshot.configuration_json or {}
@@ -241,6 +339,206 @@ def detect_extended_findings(
                         "api_endpoint": endpoint,
                         "integration_type": str(cfg.get("integration_type") or "unknown"),
                         "linked_resources": linked_lambda_refs,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "apigateway_rest_api"):
+        cfg = snapshot.configuration_json or {}
+        if bool(cfg.get("disable_execute_api_endpoint")):
+            continue
+        linked_lambda_arns = [str(x) for x in (cfg.get("linked_lambda_arns") or []) if x]
+        linked_lambda_refs: list[dict] = []
+        for arn in linked_lambda_arns:
+            lm = lambda_by_arn_or_name.get(arn)
+            if lm is not None:
+                linked_lambda_refs.append(
+                    _linked_resource_ref(
+                        resource_type="lambda_function",
+                        resource_id=str(lm.resource_id),
+                        resource_name=str((lm.configuration_json or {}).get("function_arn") or lm.resource_id),
+                        relation="fronts_lambda",
+                        confidence="direct_integration_uri",
+                        source="apigateway.get_integration",
+                    )
+                )
+            else:
+                linked_lambda_refs.append(
+                    _linked_resource_ref(
+                        resource_type="lambda_function",
+                        resource_id=arn,
+                        resource_name=arn.rsplit(":", 1)[-1],
+                        relation="fronts_lambda",
+                        confidence="direct_integration_uri",
+                        source="apigateway.get_integration",
+                    )
+                )
+        findings.append(
+            Finding(
+                tenant_id=tenant_id,
+                cloud_account_id=cloud_account_id,
+                resource_snapshot_id=snapshot.id,
+                resource_id=snapshot.resource_id,
+                resource_type=snapshot.resource_type,
+                finding_type="apigateway_public_exposure_review",
+                severity="medium",
+                evidence_json={
+                    "api_type": "rest",
+                    "integration_type": str(cfg.get("integration_type") or "unknown"),
+                    "linked_resources": linked_lambda_refs,
+                },
+                detected_at=detected_at,
+                sync_run_id=sync_run_id,
+            )
+        )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "eventbridge_rule"):
+        cfg = snapshot.configuration_json or {}
+        target_count = int(cfg.get("target_count") or 0)
+        state = str(cfg.get("state") or "").upper()
+        if target_count == 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="eventbridge_rule_without_targets",
+                    severity="medium",
+                    evidence_json={"target_count": 0, "state": state or "UNKNOWN"},
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+        if state == "DISABLED":
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="eventbridge_rule_disabled_review",
+                    severity="low",
+                    evidence_json={"state": "DISABLED", "target_count": target_count},
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "ses_email_identity"):
+        cfg = snapshot.configuration_json or {}
+        verification = str(cfg.get("verification_status") or "").upper()
+        sending_enabled = cfg.get("sending_enabled")
+        if verification and verification != "SUCCESS":
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="ses_identity_unverified",
+                    severity="medium",
+                    evidence_json={
+                        "verification_status": verification,
+                        "sending_enabled": sending_enabled,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+        if sending_enabled is False:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="ses_sending_disabled_identity",
+                    severity="medium",
+                    evidence_json={
+                        "verification_status": verification or "UNKNOWN",
+                        "sending_enabled": False,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in acm_snapshots:
+        cfg = snapshot.configuration_json or {}
+        status = str(cfg.get("status") or "").upper()
+        linked_resources = list(cfg.get("linked_resources") or [])
+        if status == "PENDING_VALIDATION":
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="acm_certificate_pending_validation",
+                    severity="medium",
+                    evidence_json={"status": status, "linked_resources": linked_resources},
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+        if status in {"FAILED", "VALIDATION_TIMED_OUT", "REVOKED"}:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="acm_certificate_validation_issue",
+                    severity="high",
+                    evidence_json={"status": status, "linked_resources": linked_resources},
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "lambda_function"):
+        cfg = snapshot.configuration_json or {}
+        runtime = str(cfg.get("runtime") or "").strip()
+        timeout = cfg.get("timeout")
+        linked_resources = list(cfg.get("linked_resources") or [])
+        if _is_outdated_lambda_runtime(runtime):
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="lambda_outdated_runtime",
+                    severity="high",
+                    evidence_json={"runtime": runtime, "linked_resources": linked_resources},
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+        if isinstance(timeout, int) and timeout >= 120:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="lambda_review_timeout_configuration",
+                    severity="medium",
+                    evidence_json={
+                        "timeout": timeout,
+                        "linked_resources": linked_resources,
+                        "vpc_link_status": cfg.get("vpc_link_status") or "unknown",
                     },
                     detected_at=detected_at,
                     sync_run_id=sync_run_id,

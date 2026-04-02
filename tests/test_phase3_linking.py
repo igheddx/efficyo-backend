@@ -85,5 +85,13 @@ def test_lambda_arn_from_apigw_integration_uri():
     assert _lambda_arn_from_integration_uri(uri) == "arn:aws:lambda:us-east-1:123456789012:function:my-fn"
 
 
+def test_lambda_arn_from_rest_apigw_integration_uri_variant():
+    uri = (
+        "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/"
+        "arn:aws:lambda:us-east-1:123456789012:function:rest-fn:$LATEST/invocations"
+    )
+    assert _lambda_arn_from_integration_uri(uri) == "arn:aws:lambda:us-east-1:123456789012:function:rest-fn:$LATEST"
+
+
 def test_lambda_arn_from_integration_uri_non_lambda_returns_none():
     assert _lambda_arn_from_integration_uri("https://example.com/non-lambda") is None

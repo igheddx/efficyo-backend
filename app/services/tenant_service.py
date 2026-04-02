@@ -3,6 +3,7 @@ from uuid import UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.demo_aws import (
     LEGACY_TIPWAVE_DEMO_ROLE_ARN,
     LEGACY_TIPWAVE_OPTIMIZATION_ROLE_ARN,
@@ -157,6 +158,8 @@ def refresh_tipwave_demo_cloud_account_metadata(db_session: Session) -> None:
     Call before sync or other AWS work so rows updated in code are applied even if
     the client never hit GET /tenants?include_demo=true.
     """
+    if not settings.enable_demo_and_local_seed:
+        return
     _migrate_legacy_tipwave_demo_cloud_accounts(db_session)
     _ensure_tipwave_stable_demo(db_session)
 
@@ -166,6 +169,8 @@ def ensure_demo_tenants(db_session: Session) -> None:
     Idempotent lightweight demo seed.
     Creates sample tenants if they do not exist.
     """
+    if not settings.enable_demo_and_local_seed:
+        return
     refresh_tipwave_demo_cloud_account_metadata(db_session)
     _rename_legacy_tipwave_tenant_label(db_session)
 

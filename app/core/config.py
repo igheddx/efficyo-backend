@@ -22,6 +22,14 @@ class Settings:
     allow_dev_header_auth: bool
     # Password for seeded dev accounts (root@fptnext.local, demo@fptnext.local, etc.).
     dev_seed_password: str
+    # When false, skip local demo users, Tipwave demo tenant/cloud rows, and demo org seeding.
+    enable_demo_and_local_seed: bool
+    # Production seed user (if set, creates this user as root admin)
+    prod_seed_email: str | None
+    prod_seed_name: str | None
+    prod_seed_password: str | None
+    prod_seed_company: str | None
+    prod_seed_customer: str | None
     # OIDC (OAuth2 authorization code + OpenID). All four must be set to enable SSO routes.
     oidc_issuer_url: str | None
     oidc_client_id: str | None
@@ -33,6 +41,16 @@ class Settings:
     openai_api_key: str | None
     openai_base_url: str | None
     copilot_model: str
+    # Transactional email (SES-ready, provider-agnostic defaults).
+    email_enabled: bool
+    email_provider: str
+    ses_region: str
+    ses_from_email: str
+    ses_from_name: str
+    email_sandbox_mode: bool
+    email_allowlist: str | None
+    frontend_url: str
+    api_public_url: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -51,6 +69,32 @@ class Settings:
         openai_key = os.getenv("FPTNEXT_OPENAI_API_KEY", "").strip() or None
         openai_base = os.getenv("FPTNEXT_OPENAI_BASE_URL", "").strip() or None
         copilot_model = os.getenv("FPTNEXT_COPILOT_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        email_enabled = os.getenv("FPTNEXT_EMAIL_ENABLED", "false").lower() in ("1", "true", "yes")
+        email_provider = os.getenv("FPTNEXT_EMAIL_PROVIDER", "ses").strip().lower() or "ses"
+        ses_region = (
+            os.getenv("FPTNEXT_SES_REGION", "").strip()
+            or os.getenv("AWS_REGION", "us-east-1").strip()
+            or "us-east-1"
+        )
+        ses_from_email = os.getenv("FPTNEXT_SES_FROM_EMAIL", "noreply@meezi.io").strip() or "noreply@meezi.io"
+        ses_from_name = os.getenv("FPTNEXT_SES_FROM_NAME", "MEEZI").strip() or "MEEZI"
+        email_sandbox_mode = os.getenv(
+            "FPTNEXT_EMAIL_SANDBOX_MODE",
+            "false" if environment == "prod" else "true",
+        ).lower() in ("1", "true", "yes")
+        email_allowlist = os.getenv("FPTNEXT_EMAIL_ALLOWLIST", "").strip() or None
+        frontend_url = os.getenv("FPTNEXT_FRONTEND_URL", "http://localhost:5173").strip() or "http://localhost:5173"
+        api_public_url = os.getenv("FPTNEXT_API_PUBLIC_URL", "http://127.0.0.1:8000").strip() or "http://127.0.0.1:8000"
+        enable_demo_seed = os.getenv("FPTNEXT_ENABLE_DEMO_AND_LOCAL_SEED", "true").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        prod_seed_email = os.getenv("FPTNEXT_PROD_SEED_EMAIL", "").strip() or None
+        prod_seed_name = os.getenv("FPTNEXT_PROD_SEED_NAME", "").strip() or None
+        prod_seed_password = os.getenv("FPTNEXT_PROD_SEED_PASSWORD", "").strip() or None
+        prod_seed_company = os.getenv("FPTNEXT_PROD_SEED_COMPANY", "").strip() or None
+        prod_seed_customer = os.getenv("FPTNEXT_PROD_SEED_CUSTOMER", "").strip() or None
 
         return cls(
             database_url=os.getenv(
@@ -73,6 +117,12 @@ class Settings:
             ),
             allow_dev_header_auth=dev_headers,
             dev_seed_password=os.getenv("FPTNEXT_DEV_SEED_PASSWORD", "devpassword"),
+            enable_demo_and_local_seed=enable_demo_seed,
+            prod_seed_email=prod_seed_email,
+            prod_seed_name=prod_seed_name,
+            prod_seed_password=prod_seed_password,
+            prod_seed_company=prod_seed_company,
+            prod_seed_customer=prod_seed_customer,
             oidc_issuer_url=oidc_issuer,
             oidc_client_id=oidc_cid,
             oidc_client_secret=oidc_sec,
@@ -88,6 +138,15 @@ class Settings:
             openai_api_key=openai_key,
             openai_base_url=openai_base,
             copilot_model=copilot_model,
+            email_enabled=email_enabled,
+            email_provider=email_provider,
+            ses_region=ses_region,
+            ses_from_email=ses_from_email,
+            ses_from_name=ses_from_name,
+            email_sandbox_mode=email_sandbox_mode,
+            email_allowlist=email_allowlist,
+            frontend_url=frontend_url,
+            api_public_url=api_public_url,
         )
 
 

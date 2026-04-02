@@ -103,6 +103,19 @@ def generate_insight_summary(
         cloud_account_id=cloud_account_id,
     )
 
+    if (
+        summary.is_snapshot_missing
+        and summary.total_recommendations == 0
+        and len(outcomes) == 0
+    ):
+        return {
+            "summary_text": "",
+            "cost_basis_note": "",
+            "cost_window": summary.cost_window,
+            "cost_window_label": summary.cost_window_label,
+            "cost_metric": summary.cost_metric,
+        }
+
     # Convert outcomes ORM objects into dict-like access for deterministic computations.
     outcomes_data = [
         {

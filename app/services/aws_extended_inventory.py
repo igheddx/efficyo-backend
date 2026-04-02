@@ -29,6 +29,40 @@ _SKIPPABLE = frozenset({"UnauthorizedOperation", "AuthFailure", "AccessDenied", 
 _MAX_SECURITY_GROUPS_PER_REGION = 2000
 
 
+def _is_world_open(ip_ranges: list[dict] | None, ipv6_ranges: list[dict] | None) -> bool:
+    for r in ip_ranges or []:
+        if str((r or {}).get("CidrIp") or "").strip() == "0.0.0.0/0":
+            return True
+    for r in ipv6_ranges or []:
+        if str((r or {}).get("CidrIpv6") or "").strip() == "::/0":
+            return True
+    return False
+
+
+def _summarize_world_open_ports(ip_permissions: list[dict] | None) -> tuple[bool, bool, bool]:
+    has_ssh = False
+    has_rdp = False
+    has_all = False
+    for perm in ip_permissions or []:
+        if not _is_world_open(perm.get("IpRanges"), perm.get("Ipv6Ranges")):
+            continue
+        proto = str(perm.get("IpProtocol") or "")
+        from_port = perm.get("FromPort")
+        to_port = perm.get("ToPort")
+        if proto == "-1":
+            has_all = True
+            continue
+        if from_port is None or to_port is None:
+            continue
+        if int(from_port) <= 22 <= int(to_port):
+            has_ssh = True
+        if int(from_port) <= 3389 <= int(to_port):
+            has_rdp = True
+        if int(from_port) == 0 and int(to_port) >= 65535:
+            has_all = True
+    return has_ssh, has_rdp, has_all
+
+
 def _linked_resource_ref(
     *,
     resource_type: str,
@@ -210,7 +244,64 @@ def _apigw_rest_one_region(role_arn: str, region: str) -> list[dict]:
             tags = client.get_tags(resourceArn=rest_arn).get("tags", {}) or {}
         except (ClientError, BotoCoreError):
             pass
-        cfg = {"name": api.get("name"), "created_date": str(api.get("createdDate", ""))}
+        linked_lambda_arns: list[str] = []
+        integration_types: set[str] = set()
+        try:
+            pos_res: str | None = None
+            resources: list[dict] = []
+            while True:
+                kwargs_res: dict[str, Any] = {"restApiId": rid, "limit": 500}
+                if pos_res:
+                    kwargs_res["position"] = pos_res
+                res_chunk = client.get_resources(**kwargs_res)
+                resources.extend(res_chunk.get("items", []) or [])
+                pos_res = res_chunk.get("position")
+                if not pos_res:
+                    break
+
+            for res in resources:
+                resource_id = str(res.get("id") or "")
+                methods = res.get("resourceMethods") or {}
+                for method_name in methods.keys():
+                    if not resource_id:
+                        continue
+                    try:
+                        integ = client.get_integration(
+                            restApiId=rid,
+                            resourceId=resource_id,
+                            httpMethod=str(method_name),
+                        )
+                    except (ClientError, BotoCoreError):
+                        continue
+                    itype = str(integ.get("type") or "")
+                    if itype:
+                        integration_types.add(itype)
+                    arn = _lambda_arn_from_integration_uri(str(integ.get("uri") or ""))
+                    if arn and arn not in linked_lambda_arns:
+                        linked_lambda_arns.append(arn)
+        except (ClientError, BotoCoreError):
+            pass
+
+        cfg = {
+            "name": api.get("name"),
+            "created_date": str(api.get("createdDate", "")),
+            "disable_execute_api_endpoint": bool(api.get("disableExecuteApiEndpoint", False)),
+            "linked_lambda_arns": linked_lambda_arns,
+            "linked_lambda_names": [a.rsplit(":", 1)[-1] for a in linked_lambda_arns],
+            "integration_type": ",".join(sorted(integration_types)) if integration_types else "unknown",
+            "integration_source": "apigateway.get_resources/get_integration",
+            "linked_resources": [
+                _linked_resource_ref(
+                    resource_type="lambda_function",
+                    resource_id=arn,
+                    resource_name=arn.rsplit(":", 1)[-1],
+                    relation="fronts_lambda",
+                    confidence="direct_integration_uri",
+                    source="apigateway.get_integration",
+                )
+                for arn in linked_lambda_arns
+            ],
+        }
         out.append(
             {
                 "resource_id": rid,
@@ -311,8 +402,14 @@ def _events_rules_one_region(role_arn: str, region: str) -> list[dict]:
                 "state": rule.get("State"),
                 "schedule_expression": rule.get("ScheduleExpression"),
                 "event_bus_name": rule.get("EventBusName", "default"),
+                "target_count": 0,
             }
             bus = cfg.get("event_bus_name") or "default"
+            try:
+                t = client.list_targets_by_rule(Rule=name, EventBusName=bus)
+                cfg["target_count"] = len(t.get("Targets", []) or [])
+            except (ClientError, BotoCoreError):
+                cfg["target_count"] = 0
             rid = f"{bus}/{name}"[:255]
             out.append(
                 {
@@ -482,6 +579,8 @@ def _sg_one_region(role_arn: str, region: str) -> list[dict]:
                     region,
                 )
                 return out
+            permissions = sg.get("IpPermissions") or []
+            has_world_open_ssh, has_world_open_rdp, has_world_open_all_ports = _summarize_world_open_ports(permissions)
             out.append(
                 {
                     "resource_id": sgid,
@@ -490,8 +589,11 @@ def _sg_one_region(role_arn: str, region: str) -> list[dict]:
                     "configuration_json": {
                         "vpc_id": sg.get("VpcId"),
                         "group_name": sg.get("GroupName"),
-                        "ingress_rule_count": len(sg.get("IpPermissions") or []),
+                        "ingress_rule_count": len(permissions),
                         "egress_rule_count": len(sg.get("IpPermissionsEgress") or []),
+                        "has_world_open_ssh": has_world_open_ssh,
+                        "has_world_open_rdp": has_world_open_rdp,
+                        "has_world_open_all_ports": has_world_open_all_ports,
                     },
                     "tags_json": _normalize_tags(sg.get("Tags", [])),
                 }

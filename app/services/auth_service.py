@@ -176,6 +176,8 @@ def ensure_local_seed_users(db: Session) -> None:
     Idempotent dev/demo users and demo org memberships (see DEMO_ORG_NAME).
     Safe to call on every app startup in dev.
     """
+    if not settings.enable_demo_and_local_seed:
+        return
     demo_org = db.query(Organization).filter(Organization.name == DEMO_ORG_NAME).first()
     if demo_org is None:
         legacy = db.query(Organization).filter(Organization.name == "Demo Organization").first()
@@ -238,8 +240,68 @@ def ensure_local_seed_users(db: Session) -> None:
                 )
         db.commit()
 
-    _ensure_user("root@fptnext.local", "Platform Root", is_root=True, org_role="root_admin")
-    _ensure_user("demo@fptnext.local", "Demo User", org_role="org_admin")
-    _ensure_user("admin@fptnext.local", "Tenant Admin", org_role="admin")
-    _ensure_user("approver@fptnext.local", "Approver", org_role="approver")
-    _ensure_user("viewer@fptnext.local", "Viewer", org_role="viewer")
+    # Create production seed user if configured (overrides demo users)
+    if (
+        settings.prod_seed_email
+        and settings.prod_seed_name
+        and settings.prod_seed_password
+    ):
+        # Use custom production seed user (with custom password)
+        prod_pw = settings.prod_seed_password
+
+        def _ensure_prod_user(
+            email: str,
+            display_name: str,
+            password: str,
+            *,
+            is_root: bool = False,
+            org_role: str | None = None,
+        ) -> None:
+            u = get_user_by_email(db, email)
+            if u is None:
+                u = User(
+                    email=email.strip().lower(),
+                    password_hash=hash_password(password),
+                    display_name=display_name,
+                    is_root_admin=is_root,
+                    auth_provider="local",
+                )
+                db.add(u)
+                db.flush()
+            else:
+                if is_root and not u.is_root_admin:
+                    u.is_root_admin = True
+            if org_role:
+                exists = (
+                    db.query(OrgMembership.id)
+                    .filter(
+                        OrgMembership.organization_id == demo_org.id,
+                        OrgMembership.user_id == u.id,
+                    )
+                    .first()
+                )
+                if not exists:
+                    db.add(
+                        OrgMembership(
+                            organization_id=demo_org.id,
+                            user_id=u.id,
+                            user_identifier=u.email,
+                            role=org_role,
+                        )
+                    )
+            db.commit()
+
+        _ensure_prod_user(
+            settings.prod_seed_email,
+            settings.prod_seed_name,
+            prod_pw,
+            is_root=True,
+            org_role="root_admin",
+        )
+    else:
+        # Use demo seed users (default)
+        _ensure_user("root@fptnext.local", "Platform Root", is_root=True, org_role="root_admin")
+        _ensure_user("demo@fptnext.local", "Demo User", org_role="org_admin")
+        _ensure_user("admin@fptnext.local", "Tenant Admin", org_role="admin")
+        _ensure_user("approver@fptnext.local", "Approver", org_role="approver")
+        _ensure_user("viewer@fptnext.local", "Viewer", org_role="viewer")

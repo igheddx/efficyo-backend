@@ -29,6 +29,7 @@ class SummaryResult:
     cost_window: str
     cost_window_label: str
     cost_metric: str
+    is_snapshot_missing: bool
 
 
 @dataclass
@@ -173,6 +174,7 @@ def get_cloud_account_summary(
         cost_window=cost_window,
         cost_window_label=cost_window_label,
         cost_metric=cost_metric,
+        is_snapshot_missing=bool(cost_summary.get("is_snapshot_missing")),
         top_savings_opportunity=(
             _to_summary_recommendation(top_savings_recommendation, stats_by_type)
             if top_savings_recommendation is not None
