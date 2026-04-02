@@ -1,8 +1,11 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from app.api.v1.router import router as api_v1_router
@@ -11,6 +14,9 @@ from app.core.logging import configure_logging
 from app.services import auth_service
 
 configure_logging()
+
+WORKER_HEARTBEAT_PATH = Path("/app/runtime/worker-heartbeat.json")
+WORKER_HEARTBEAT_MAX_AGE_SECONDS = 180
 
 
 @asynccontextmanager
@@ -76,8 +82,44 @@ async def database_schema_handler(_request: Request, _exc: ProgrammingError) -> 
 
 
 @app.get("/health", tags=["health"])
-async def health_check() -> dict[str, str]:
-    return {"status": "ok"}
+async def health_check() -> JSONResponse:
+    db_status = "ok"
+    worker_status = "stale"
+    worker_last_seen: str | None = None
+    http_status = status.HTTP_200_OK
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        db_status = "error"
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+    finally:
+        db.close()
+
+    if WORKER_HEARTBEAT_PATH.is_file():
+        heartbeat_age = datetime.now(timezone.utc).timestamp() - WORKER_HEARTBEAT_PATH.stat().st_mtime
+        worker_last_seen = datetime.fromtimestamp(
+            WORKER_HEARTBEAT_PATH.stat().st_mtime,
+            tz=timezone.utc,
+        ).isoformat()
+        if heartbeat_age <= WORKER_HEARTBEAT_MAX_AGE_SECONDS:
+            worker_status = "ok"
+        else:
+            http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+    else:
+        http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    overall_status = "ok" if http_status == status.HTTP_200_OK else "degraded"
+    return JSONResponse(
+        status_code=http_status,
+        content={
+            "status": overall_status,
+            "database": db_status,
+            "worker": worker_status,
+            "worker_last_seen": worker_last_seen,
+        },
+    )
 
 
 app.include_router(api_v1_router, prefix="/api")
