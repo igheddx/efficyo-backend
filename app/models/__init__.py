@@ -16,6 +16,7 @@ from app.models.finding import Finding
 from app.models.ingestion_job import IngestionJob
 from app.models.notification import Notification
 from app.models.organization import OrgMembership, Organization
+from app.models.platform_setting import PlatformSetting
 from app.models.policy_profile import PolicyProfile
 from app.models.recommendation import Recommendation
 from app.models.recommendation_outcome import RecommendationOutcome
@@ -42,6 +43,7 @@ __all__ = [
 	"Notification",
 	"OrgMembership",
 	"Organization",
+	"PlatformSetting",
 	"PolicyProfile",
 	"Recommendation",
 	"RecommendationOutcome",
