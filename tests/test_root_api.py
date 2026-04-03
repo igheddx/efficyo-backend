@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.models.organization import OrgMembership, Organization
 from app.services import auth_service
+from app.services.resource_capability_registry import SUPPORTED_SNAPSHOT_RESOURCE_TYPES
 
 
 def test_root_routes_forbidden_for_viewer(client: TestClient):
@@ -19,6 +20,32 @@ def test_root_dashboard_ok(client: TestClient):
     data = r.json()
     assert "total_organizations" in data
     assert "pending_approvals" in data
+
+
+def test_root_resource_coverage_summary(client: TestClient):
+    r = client.get(
+        "/api/v1/root/resource-coverage",
+        headers={"X-User": "root", "X-Role": "root_admin"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+
+    assert body["total_supported_snapshot_types"] == len(SUPPORTED_SNAPSHOT_RESOURCE_TYPES)
+    assert body["total_taggable_types"] > 0
+    assert body["total_tag_governance_mapped_types"] > 0
+    assert len(body["resources"]) == len(SUPPORTED_SNAPSHOT_RESOURCE_TYPES)
+
+    rows = {row["resource_type"]: row for row in body["resources"]}
+
+    # Guard against regression in IoT governance wiring.
+    assert rows["iot_thing"]["has_tag_governance_detection"] is True
+    assert rows["iot_thing"]["has_tag_governance_recommendation"] is True
+    assert rows["iot_thing"]["finding_type"] == "iot_thing_missing_required_tags"
+    assert rows["iot_thing"]["recommendation_type"] == "iot_add_required_tags"
+
+    # Core EC2 governance is tracked under ec2 -> ec2_instance aliasing.
+    assert rows["ec2_instance"]["finding_type"] == "ec2_missing_required_tags"
+    assert rows["ec2_instance"]["recommendation_type"] == "ec2_add_required_tags"
 
 
 def test_root_org_list_pagination(client: TestClient, db):

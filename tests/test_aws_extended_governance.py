@@ -26,6 +26,10 @@ def test_extended_finding_types_in_recommendation_sources():
         "ses_sending_disabled_identity",
         "security_group_world_open_sensitive_port",
         "security_group_overly_permissive",
+        "load_balancer_deletion_protection_disabled",
+        "load_balancer_no_healthy_targets",
+        "route_table_unassociated_review",
+        "route_table_public_default_route_review",
         "lambda_outdated_runtime",
         "lambda_review_timeout_configuration",
     ):

@@ -32,6 +32,10 @@ def test_extended_finding_types_map_to_recommendations(db):  # noqa: ARG001 - fi
         ("ses_sending_disabled_identity", "ses_email_identity", "ses_review_sending_configuration"),
         ("security_group_world_open_sensitive_port", "security_group", "security_group_restrict_world_open_ports"),
         ("security_group_overly_permissive", "security_group", "security_group_restrict_ingress"),
+        ("load_balancer_deletion_protection_disabled", "load_balancer", "load_balancer_enable_deletion_protection"),
+        ("load_balancer_no_healthy_targets", "load_balancer", "load_balancer_review_target_health"),
+        ("route_table_unassociated_review", "route_table", "route_table_cleanup_unused"),
+        ("route_table_public_default_route_review", "route_table", "route_table_review_public_egress"),
         ("lambda_outdated_runtime", "lambda_function", "lambda_update_runtime"),
         ("lambda_review_timeout_configuration", "lambda_function", "lambda_review_timeout_configuration"),
     ]

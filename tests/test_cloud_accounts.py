@@ -142,8 +142,8 @@ def test_get_cost_summary_success(client, dev_org_scope, monkeypatch):
     cloud_account_id = create_response.json()["id"]
 
     monkeypatch.setattr(
-        "app.services.cost_explorer_service.fetch_cost_summary",
-        lambda role_arn: {
+        "app.services.cost_summary_service.get_cost_summary",
+        lambda db_session, tenant_id, cloud_account_id: {
             "start_date": "2026-02-24",
             "end_date": "2026-03-25",
             "total_cost": 123.45,
@@ -210,10 +210,10 @@ def test_get_cost_summary_maps_aws_permission_error_to_502(client, dev_org_scope
         operation_name="GetCostAndUsage",
     )
 
-    def _raise_client_error(role_arn):
+    def _raise_client_error(db_session, tenant_id, cloud_account_id):
         raise client_error
 
-    monkeypatch.setattr("app.services.cost_explorer_service.fetch_cost_summary", _raise_client_error)
+    monkeypatch.setattr("app.services.cost_summary_service.get_cost_summary", _raise_client_error)
 
     response = client.get(
         f"/api/v1/tenants/{tenant_id}/cloud-accounts/{cloud_account_id}/cost-summary", headers=h
@@ -221,8 +221,7 @@ def test_get_cost_summary_maps_aws_permission_error_to_502(client, dev_org_scope
 
     assert response.status_code == 502
     detail = response.json()["detail"]
-    assert detail["error_type"] == "aws_authorization_error"
-    assert detail["aws_error_code"] == "AccessDeniedException"
+    assert detail["error_type"] == "cost_snapshot_unavailable"
 
 
 def test_get_cost_summary_maps_aws_unavailable_error_to_502(client, dev_org_scope, monkeypatch):
@@ -245,10 +244,10 @@ def test_get_cost_summary_maps_aws_unavailable_error_to_502(client, dev_org_scop
         operation_name="GetCostAndUsage",
     )
 
-    def _raise_client_error(role_arn):
+    def _raise_client_error(db_session, tenant_id, cloud_account_id):
         raise client_error
 
-    monkeypatch.setattr("app.services.cost_explorer_service.fetch_cost_summary", _raise_client_error)
+    monkeypatch.setattr("app.services.cost_summary_service.get_cost_summary", _raise_client_error)
 
     response = client.get(
         f"/api/v1/tenants/{tenant_id}/cloud-accounts/{cloud_account_id}/cost-summary", headers=h
@@ -256,8 +255,7 @@ def test_get_cost_summary_maps_aws_unavailable_error_to_502(client, dev_org_scop
 
     assert response.status_code == 502
     detail = response.json()["detail"]
-    assert detail["error_type"] == "aws_service_unavailable"
-    assert detail["aws_error_code"] == "DataUnavailableException"
+    assert detail["error_type"] == "cost_snapshot_unavailable"
 
 
 def test_get_ec2_other_breakdown_success(client, dev_org_scope, monkeypatch):
@@ -276,8 +274,8 @@ def test_get_ec2_other_breakdown_success(client, dev_org_scope, monkeypatch):
     cloud_account_id = create_response.json()["id"]
 
     monkeypatch.setattr(
-        "app.services.cost_explorer_service.fetch_ec2_other_breakdown",
-        lambda role_arn: {
+        "app.services.cost_summary_service.get_ec2_other_breakdown",
+        lambda db_session, tenant_id, cloud_account_id: {
             "ec2_other_total": 14.25,
             "breakdown": [
                 {"category": "NAT Gateway", "amount": 10.0},
@@ -341,10 +339,10 @@ def test_get_ec2_other_breakdown_maps_aws_permission_error_to_502(client, dev_or
         operation_name="GetCostAndUsage",
     )
 
-    def _raise_client_error(role_arn):
+    def _raise_client_error(db_session, tenant_id, cloud_account_id):
         raise client_error
 
-    monkeypatch.setattr("app.services.cost_explorer_service.fetch_ec2_other_breakdown", _raise_client_error)
+    monkeypatch.setattr("app.services.cost_summary_service.get_ec2_other_breakdown", _raise_client_error)
 
     response = client.get(
         f"/api/v1/tenants/{tenant_id}/cloud-accounts/{cloud_account_id}/cost-breakdown/ec2-other",
@@ -353,8 +351,7 @@ def test_get_ec2_other_breakdown_maps_aws_permission_error_to_502(client, dev_or
 
     assert response.status_code == 502
     detail = response.json()["detail"]
-    assert detail["error_type"] == "aws_authorization_error"
-    assert detail["aws_error_code"] == "AccessDeniedException"
+    assert detail["error_type"] == "cost_snapshot_unavailable"
 
 
 def test_get_ec2_other_breakdown_maps_aws_unavailable_error_to_502(client, dev_org_scope, monkeypatch):
@@ -377,10 +374,10 @@ def test_get_ec2_other_breakdown_maps_aws_unavailable_error_to_502(client, dev_o
         operation_name="GetCostAndUsage",
     )
 
-    def _raise_client_error(role_arn):
+    def _raise_client_error(db_session, tenant_id, cloud_account_id):
         raise client_error
 
-    monkeypatch.setattr("app.services.cost_explorer_service.fetch_ec2_other_breakdown", _raise_client_error)
+    monkeypatch.setattr("app.services.cost_summary_service.get_ec2_other_breakdown", _raise_client_error)
 
     response = client.get(
         f"/api/v1/tenants/{tenant_id}/cloud-accounts/{cloud_account_id}/cost-breakdown/ec2-other",
@@ -389,8 +386,7 @@ def test_get_ec2_other_breakdown_maps_aws_unavailable_error_to_502(client, dev_o
 
     assert response.status_code == 502
     detail = response.json()["detail"]
-    assert detail["error_type"] == "aws_service_unavailable"
-    assert detail["aws_error_code"] == "DataUnavailableException"
+    assert detail["error_type"] == "cost_snapshot_unavailable"
 
 
 @patch("app.services.cloud_account_service.aws_validation_service.validate_cloud_account_role")

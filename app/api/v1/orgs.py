@@ -32,12 +32,14 @@ def _member_read(m) -> OrgMembershipRead:
     user = getattr(m, "user", None)
     email = user.email if user is not None else m.user_identifier
     display_name = user.display_name if user is not None else None
+    user_status = (user.status if user is not None else "active") or "active"
     return OrgMembershipRead(
         id=m.id,
         organization_id=m.organization_id,
         user_id=m.user_id,
         email=email,
         display_name=display_name,
+        user_status=user_status,
         role=m.role,
         created_at=m.created_at,
         updated_at=m.updated_at,

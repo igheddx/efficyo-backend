@@ -78,6 +78,7 @@ def ingest_ec2(
         instances = aws_inventory_service.fetch_ec2_instances(
             role_arn=cloud_account.role_arn,
             region=cloud_account.region_default,
+            external_id=cloud_account.external_id,
         )
 
         # Persist snapshots
@@ -118,10 +119,12 @@ def ingest_rds(
         rds_instances = aws_inventory_service.fetch_rds_instances(
             role_arn=cloud_account.role_arn,
             region=cloud_account.region_default,
+            external_id=cloud_account.external_id,
         )
         aurora_clusters = aws_inventory_service.fetch_aurora_clusters(
             role_arn=cloud_account.role_arn,
             region=cloud_account.region_default,
+            external_id=cloud_account.external_id,
         )
         _enrich_aurora_clusters_with_member_public_access(rds_instances, aurora_clusters)
         resources = rds_instances + aurora_clusters
@@ -163,6 +166,7 @@ def ingest_lambda(
         functions = aws_inventory_service.fetch_lambda_functions(
             role_arn=cloud_account.role_arn,
             region=cloud_account.region_default,
+            external_id=cloud_account.external_id,
         )
 
         ingested_count, captured_at = resource_snapshot_service.create_snapshots(
@@ -202,6 +206,7 @@ def ingest_s3(
         buckets = aws_inventory_service.fetch_s3_buckets(
             role_arn=cloud_account.role_arn,
             region=cloud_account.region_default,
+            external_id=cloud_account.external_id,
         )
 
         ingested_count, captured_at = resource_snapshot_service.create_snapshots(
@@ -241,6 +246,7 @@ def ingest_ebs(
         volumes = aws_inventory_service.fetch_ebs_volumes(
             role_arn=cloud_account.role_arn,
             region=cloud_account.region_default,
+            external_id=cloud_account.external_id,
         )
 
         ingested_count, captured_at = resource_snapshot_service.create_snapshots(
@@ -281,9 +287,10 @@ def ingest_extended_aws_services(
     cloud_account = cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
     role_arn = cloud_account.role_arn
     region = cloud_account.region_default
+    external_id = cloud_account.external_id
 
     counts: dict[str, int] = {}
-    batches = aws_extended_inventory.fetch_all_extended(role_arn, region)
+    batches = aws_extended_inventory.fetch_all_extended(role_arn, region, external_id)
     for key, resources in batches.items():
         if not resources:
             counts[key] = 0

@@ -4,7 +4,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.services import detection_service, ingestion_service, recommendation_service
+from app.services import detection_extended_service, detection_service, ingestion_service, recommendation_service
 
 
 class ResourceSyncJobRunner:
@@ -14,12 +14,14 @@ class ResourceSyncJobRunner:
         ingestion_service.ingest_rds(db, tenant_id, cloud_account_id)
         ingestion_service.ingest_lambda(db, tenant_id, cloud_account_id)
         ingestion_service.ingest_s3(db, tenant_id, cloud_account_id)
+        ingestion_service.ingest_extended_aws_services(db, tenant_id, cloud_account_id)
 
         detection_service.detect_ec2_findings(db, tenant_id, cloud_account_id, sync_run_id)
         detection_service.detect_ebs_findings(db, tenant_id, cloud_account_id, sync_run_id)
         detection_service.detect_rds_findings(db, tenant_id, cloud_account_id, sync_run_id)
         detection_service.detect_lambda_findings(db, tenant_id, cloud_account_id, sync_run_id)
         detection_service.detect_s3_findings(db, tenant_id, cloud_account_id, sync_run_id)
+        detection_extended_service.detect_extended_findings(db, tenant_id, cloud_account_id, sync_run_id)
 
         recommendation_service.generate_rds_recommendations(db, tenant_id, cloud_account_id, sync_run_id=sync_run_id)
         return {"status": "ok"}

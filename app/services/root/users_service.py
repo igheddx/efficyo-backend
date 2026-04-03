@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models.organization import OrgMembership, Organization
 from app.models.user import User
-from app.services import auth_service
+from app.services import auth_service, invite_email_service
 
 
 def list_root_global_users(
@@ -79,7 +79,7 @@ def root_create_org_user(
     *,
     organization_id: UUID,
     email: str,
-    password: str,
+    password: str | None,
     display_name: str | None,
     role: str,
 ) -> dict:
@@ -98,12 +98,31 @@ def root_create_org_user(
     target = auth_service.get_user_by_email(db, normalized)
     if target is None:
         dn = (display_name or "").strip() or normalized.split("@", 1)[0]
-        target = auth_service.create_user(
+        temp_password = auth_service.generate_temporary_password()
+        target = auth_service.create_pending_local_user(
             db,
             email=normalized,
-            password=password,
             display_name=dn,
-            is_root_admin=False,
+            temporary_password=temp_password,
+        )
+        invite_email_service.send_local_user_invitation_email(
+            recipient_email=target.email,
+            recipient_name=target.display_name,
+            temporary_password=temp_password,
+            expires_in_days=auth_service.TEMP_PASSWORD_EXPIRES_DAYS,
+        )
+    elif target.auth_provider == "local" and bool(target.must_change_password):
+        temp_password = auth_service.generate_temporary_password()
+        target = auth_service.rotate_temporary_password_for_existing_local_user(
+            db,
+            user=target,
+            temporary_password=temp_password,
+        )
+        invite_email_service.send_local_user_invitation_email(
+            recipient_email=target.email,
+            recipient_name=target.display_name,
+            temporary_password=temp_password,
+            expires_in_days=auth_service.TEMP_PASSWORD_EXPIRES_DAYS,
         )
     existing = (
         db.query(OrgMembership)

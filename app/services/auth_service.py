@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import string
 from datetime import datetime, timedelta, timezone
 
 from app.core.org_slug import ensure_unique_org_slug, slugify_name
@@ -13,15 +14,29 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.constants import DEMO_ORG_NAME
+from app.core.password_policy import password_policy_error
 from app.models.organization import Organization, OrgMembership
 from app.models.user import AuthSession, User
 from app.services import context_defaults_service
 
 SESSION_TOKEN_BYTES = 32
+TEMP_PASSWORD_EXPIRES_DAYS = 14
 
 
 def _hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _password_policy_error(password: str) -> str | None:
+    return password_policy_error(password)
+
+
+def generate_temporary_password(length: int = 14) -> str:
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(length))
+        if _password_policy_error(pw) is None:
+            return pw
 
 
 def verify_password(plain: str, password_hash: str | None) -> bool:
@@ -74,6 +89,50 @@ def create_user(
     db.commit()
     db.refresh(u)
     return u
+
+
+def create_pending_local_user(
+    db: Session,
+    *,
+    email: str,
+    display_name: str,
+    temporary_password: str,
+    expires_in_days: int = TEMP_PASSWORD_EXPIRES_DAYS,
+) -> User:
+    normalized = email.strip().lower()
+    now = datetime.now(timezone.utc)
+    user = User(
+        email=normalized,
+        password_hash=hash_password(temporary_password),
+        display_name=display_name.strip() or normalized,
+        status="pending",
+        must_change_password=True,
+        temporary_password_expires_at=now + timedelta(days=expires_in_days),
+        is_root_admin=False,
+        auth_provider="local",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def rotate_temporary_password_for_existing_local_user(
+    db: Session,
+    *,
+    user: User,
+    temporary_password: str,
+    expires_in_days: int = TEMP_PASSWORD_EXPIRES_DAYS,
+) -> User:
+    now = datetime.now(timezone.utc)
+    user.password_hash = hash_password(temporary_password)
+    user.must_change_password = True
+    user.temporary_password_expires_at = now + timedelta(days=expires_in_days)
+    if hasattr(user, "status"):
+        user.status = "pending"
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 def create_session(
@@ -156,11 +215,31 @@ def login_with_password(db: Session, login: str, password: str) -> tuple[User, s
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
         )
+
+    if u.auth_provider == "local" and u.must_change_password:
+        exp = u.temporary_password_expires_at
+        if exp is None or exp.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "temporary_password_expired",
+                    "message": "Your temporary password has expired. Ask your administrator to send a new invitation.",
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "temporary_password_change_required",
+                "message": "Temporary password accepted. Set a new password to finish sign in.",
+            },
+        )
+
     if (u.status or "active") != "active":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This account has been disabled.",
         )
+
     org_id = context_defaults_service.pick_initial_session_organization_id(db, u)
     _session, raw = create_session(db, u, current_organization_id=org_id)
     now = datetime.now(timezone.utc)
@@ -168,6 +247,69 @@ def login_with_password(db: Session, login: str, password: str) -> tuple[User, s
     db.add(u)
     db.commit()
     db.refresh(u)
+    return u, raw
+
+
+def complete_temporary_password_login(
+    db: Session,
+    *,
+    login: str,
+    temporary_password: str,
+    new_password: str,
+    confirm_password: str,
+) -> tuple[User, str]:
+    u = get_user_by_email(db, login)
+    if u is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
+    if (u.auth_provider or "local") != "local":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password onboarding applies only to local MEEZI accounts.",
+        )
+    if not u.must_change_password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Temporary password flow is not active.")
+    if not verify_password(temporary_password, u.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
+
+    exp = u.temporary_password_expires_at
+    if exp is None or exp.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Temporary password expired. Ask your administrator to send a new invitation.",
+        )
+
+    if new_password != confirm_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "password_confirmation_mismatch",
+                "field": "confirm_password",
+                "message": "Passwords do not match.",
+            },
+        )
+
+    policy_error = _password_policy_error(new_password)
+    if policy_error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "password_policy_failed",
+                "field": "new_password",
+                "message": policy_error,
+            },
+        )
+
+    u.password_hash = hash_password(new_password)
+    u.status = "active"
+    u.must_change_password = False
+    u.temporary_password_expires_at = None
+    u.last_login_at = datetime.now(timezone.utc)
+    db.add(u)
+    db.commit()
+    db.refresh(u)
+
+    org_id = context_defaults_service.pick_initial_session_organization_id(db, u)
+    _session, raw = create_session(db, u, current_organization_id=org_id)
     return u, raw
 
 

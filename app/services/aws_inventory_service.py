@@ -21,12 +21,12 @@ _SKIPPABLE_REGION_ERRORS = frozenset({
 })
 
 
-def _inventory_regions(role_arn: str, home_region: str) -> list[str]:
+def _inventory_regions(role_arn: str, home_region: str, external_id: str | None = None) -> list[str]:
     """Regions to scan: either the cloud account default only, or all commercial regions for the account."""
     if not settings.aws_scan_all_regions:
         return [home_region]
     try:
-        ec2 = _create_assumed_client("ec2", role_arn=role_arn, region=home_region)
+        ec2 = _create_assumed_client("ec2", role_arn=role_arn, region=home_region, external_id=external_id)
         resp = ec2.describe_regions(AllRegions=False)
         names = sorted({r["RegionName"] for r in resp.get("Regions", [])})
         return names if names else [home_region]
@@ -43,8 +43,9 @@ def _gather_per_region(
     home_region: str,
     fetch_one_region: Callable[[str], list[dict]],
     label: str,
+    external_id: str | None = None,
 ) -> list[dict]:
-    regions = _inventory_regions(role_arn, home_region)
+    regions = _inventory_regions(role_arn, home_region, external_id=external_id)
     merged: list[dict] = []
     for reg in regions:
         try:
@@ -68,12 +69,13 @@ def _gather_per_region(
     return merged
 
 
-def _create_assumed_client(service_name: str, role_arn: str, region: str):
+def _create_assumed_client(service_name: str, role_arn: str, region: str, external_id: str | None = None):
     """Create a boto3 client using assumed role credentials."""
     credentials = aws_assume_role_service.assume_role(
         role_arn=role_arn,
         region=region,
         session_name="fptnext-inventory",
+        external_id=external_id,
     )
     return boto3.client(
         service_name,
@@ -138,8 +140,8 @@ def _fetch_lambda_tags_for_arn(lambda_client, function_arn: str | None, resource
         return {}
 
 
-def _fetch_ec2_instances_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2_client = _create_assumed_client("ec2", role_arn=role_arn, region=region)
+def _fetch_ec2_instances_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2_client = _create_assumed_client("ec2", role_arn=role_arn, region=region, external_id=external_id)
     paginator = ec2_client.get_paginator("describe_instances")
     page_iterator = paginator.paginate()
     instances = []
@@ -151,7 +153,7 @@ def _fetch_ec2_instances_one_region(role_arn: str, region: str) -> list[dict]:
     return instances
 
 
-def fetch_ec2_instances(role_arn: str, region: str) -> list[dict]:
+def fetch_ec2_instances(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """
     Fetch EC2 instances from an AWS account using role assumption.
 
@@ -165,9 +167,9 @@ def fetch_ec2_instances(role_arn: str, region: str) -> list[dict]:
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_ec2_instances_one_region(role_arn, reg)
+            return _fetch_ec2_instances_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "EC2")
+        return _gather_per_region(role_arn, region, _one, "EC2", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -181,8 +183,8 @@ def fetch_ec2_instances(role_arn: str, region: str) -> list[dict]:
         raise
 
 
-def _fetch_rds_instances_one_region(role_arn: str, region: str) -> list[dict]:
-    rds_client = _create_assumed_client("rds", role_arn=role_arn, region=region)
+def _fetch_rds_instances_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    rds_client = _create_assumed_client("rds", role_arn=role_arn, region=region, external_id=external_id)
     paginator = rds_client.get_paginator("describe_db_instances")
     instances = []
     for page in paginator.paginate():
@@ -198,14 +200,14 @@ def _fetch_rds_instances_one_region(role_arn: str, region: str) -> list[dict]:
     return instances
 
 
-def fetch_rds_instances(role_arn: str, region: str) -> list[dict]:
+def fetch_rds_instances(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch RDS DB instances and normalize them to snapshot format (optionally all regions)."""
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_rds_instances_one_region(role_arn, reg)
+            return _fetch_rds_instances_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "RDS")
+        return _gather_per_region(role_arn, region, _one, "RDS", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -219,8 +221,8 @@ def fetch_rds_instances(role_arn: str, region: str) -> list[dict]:
         raise
 
 
-def _fetch_aurora_clusters_one_region(role_arn: str, region: str) -> list[dict]:
-    rds_client = _create_assumed_client("rds", role_arn=role_arn, region=region)
+def _fetch_aurora_clusters_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    rds_client = _create_assumed_client("rds", role_arn=role_arn, region=region, external_id=external_id)
     paginator = rds_client.get_paginator("describe_db_clusters")
     clusters = []
     for page in paginator.paginate():
@@ -236,14 +238,14 @@ def _fetch_aurora_clusters_one_region(role_arn: str, region: str) -> list[dict]:
     return clusters
 
 
-def fetch_aurora_clusters(role_arn: str, region: str) -> list[dict]:
+def fetch_aurora_clusters(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch Aurora DB clusters and normalize them to snapshot format (optionally all regions)."""
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_aurora_clusters_one_region(role_arn, reg)
+            return _fetch_aurora_clusters_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "Aurora")
+        return _gather_per_region(role_arn, region, _one, "Aurora", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -257,8 +259,8 @@ def fetch_aurora_clusters(role_arn: str, region: str) -> list[dict]:
         raise
 
 
-def _fetch_lambda_functions_one_region(role_arn: str, region: str) -> list[dict]:
-    lambda_client = _create_assumed_client("lambda", role_arn=role_arn, region=region)
+def _fetch_lambda_functions_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    lambda_client = _create_assumed_client("lambda", role_arn=role_arn, region=region, external_id=external_id)
     paginator = lambda_client.get_paginator("list_functions")
     functions = []
     for page in paginator.paginate():
@@ -274,14 +276,14 @@ def _fetch_lambda_functions_one_region(role_arn: str, region: str) -> list[dict]
     return functions
 
 
-def fetch_lambda_functions(role_arn: str, region: str) -> list[dict]:
+def fetch_lambda_functions(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch Lambda functions and normalize them to snapshot format (optionally all regions)."""
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_lambda_functions_one_region(role_arn, reg)
+            return _fetch_lambda_functions_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "Lambda")
+        return _gather_per_region(role_arn, region, _one, "Lambda", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -295,8 +297,8 @@ def fetch_lambda_functions(role_arn: str, region: str) -> list[dict]:
         raise
 
 
-def _fetch_ebs_volumes_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2_client = _create_assumed_client("ec2", role_arn=role_arn, region=region)
+def _fetch_ebs_volumes_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2_client = _create_assumed_client("ec2", role_arn=role_arn, region=region, external_id=external_id)
     paginator = ec2_client.get_paginator("describe_volumes")
     volumes = []
     for page in paginator.paginate():
@@ -306,14 +308,14 @@ def _fetch_ebs_volumes_one_region(role_arn: str, region: str) -> list[dict]:
     return volumes
 
 
-def fetch_ebs_volumes(role_arn: str, region: str) -> list[dict]:
+def fetch_ebs_volumes(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch EBS volumes and normalize them to snapshot format (optionally all regions)."""
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_ebs_volumes_one_region(role_arn, reg)
+            return _fetch_ebs_volumes_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "EBS")
+        return _gather_per_region(role_arn, region, _one, "EBS", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -466,10 +468,10 @@ def _normalize_ebs_volume(volume: dict, region: str) -> dict:
     }
 
 
-def fetch_s3_buckets(role_arn: str, region: str) -> list[dict]:
+def fetch_s3_buckets(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch S3 buckets and normalize them to snapshot format."""
     try:
-        s3_client = _create_assumed_client("s3", role_arn=role_arn, region=region)
+        s3_client = _create_assumed_client("s3", role_arn=role_arn, region=region, external_id=external_id)
 
         response = s3_client.list_buckets()
         buckets = []

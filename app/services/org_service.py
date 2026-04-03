@@ -10,7 +10,7 @@ from app.core.constants import DEMO_ORG_NAME
 from app.core.org_slug import ensure_unique_org_slug, slugify_name
 from app.core.user_context import UserContext, VALID_ROLES, membership_subject_filter
 from app.models.organization import OrgMembership, Organization
-from app.services import access_resolution_service, auth_service, tenant_scope_service
+from app.services import access_resolution_service, auth_service, invite_email_service, tenant_scope_service
 from app.services.access_resolution_service import org_membership_role_label
 
 
@@ -255,37 +255,58 @@ def add_member(
 
     target = auth_service.get_user_by_email(db, normalized)
     if target is None:
-        if not password:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "User not found. Provide password (min 8 characters) and optional display_name "
-                    "to create a local account and add it to this organization."
-                ),
-            )
         dn = (display_name or "").strip() or normalized.split("@", 1)[0]
-        target = auth_service.create_user(
-            db,
-            email=normalized,
-            password=password,
-            display_name=dn,
-            is_root_admin=False,
+        if password:
+            target = auth_service.create_user(
+                db,
+                email=normalized,
+                password=password,
+                display_name=dn,
+                is_root_admin=False,
+            )
+        else:
+            temp_password = auth_service.generate_temporary_password()
+            target = auth_service.create_pending_local_user(
+                db,
+                email=normalized,
+                display_name=dn,
+                temporary_password=temp_password,
+            )
+            invite_email_service.send_local_user_invitation_email(
+                recipient_email=target.email,
+                recipient_name=target.display_name,
+                temporary_password=temp_password,
+                expires_in_days=auth_service.TEMP_PASSWORD_EXPIRES_DAYS,
+            )
+    else:
+        existing = (
+            db.query(OrgMembership)
+            .filter(
+                OrgMembership.organization_id == org.id,
+                OrgMembership.user_id == target.id,
+            )
+            .first()
         )
+        if existing:
+            existing.role = r
+            existing.user_identifier = target.email
+            db.commit()
+            db.refresh(existing)
+            return existing
 
-    existing = (
-        db.query(OrgMembership)
-        .filter(
-            OrgMembership.organization_id == org.id,
-            OrgMembership.user_id == target.id,
-        )
-        .first()
-    )
-    if existing:
-        existing.role = r
-        existing.user_identifier = target.email
-        db.commit()
-        db.refresh(existing)
-        return existing
+        if target.auth_provider == "local" and bool(target.must_change_password):
+            temp_password = auth_service.generate_temporary_password()
+            target = auth_service.rotate_temporary_password_for_existing_local_user(
+                db,
+                user=target,
+                temporary_password=temp_password,
+            )
+            invite_email_service.send_local_user_invitation_email(
+                recipient_email=target.email,
+                recipient_name=target.display_name,
+                temporary_password=temp_password,
+                expires_in_days=auth_service.TEMP_PASSWORD_EXPIRES_DAYS,
+            )
 
     row = OrgMembership(
         organization_id=org.id,
