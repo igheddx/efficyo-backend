@@ -438,6 +438,87 @@ def guided_actions_for_type(recommendation_type: str) -> tuple[list[str], str, s
             "easy",
         )
 
+    if rtype == "attach_targets_or_cleanup":
+        return (
+            [
+                "Open the target group and verify intended service ownership",
+                "Register valid targets if this target group is active",
+                "If deprecated, detach from listeners and clean up safely",
+                "Recheck that no production listeners depend on this target group",
+            ],
+            "15-30 minutes",
+            "medium",
+        )
+
+    if rtype == "investigate_unhealthy_targets":
+        return (
+            [
+                "Inspect target health reason codes in target group details",
+                "Validate application port, path, and backend readiness",
+                "Confirm security groups and NACLs allow health checks",
+                "Retest until healthy targets are stable",
+            ],
+            "20-45 minutes",
+            "medium",
+        )
+
+    if rtype == "fix_health_check_configuration":
+        return (
+            [
+                "Review health check protocol, path, timeout, and interval",
+                "Align thresholds with expected app startup and response profile",
+                "Apply changes in non-peak window",
+                "Validate target transitions from initial to healthy",
+            ],
+            "10-25 minutes",
+            "easy",
+        )
+
+    if rtype == "load_balancer_cleanup_unused":
+        return (
+            [
+                "Confirm the load balancer has no active DNS or application dependency",
+                "Check listeners and target group attachments",
+                "Remove orphaned load balancer resources or restore intended wiring",
+                "Monitor for unexpected traffic after change",
+            ],
+            "20-40 minutes",
+            "medium",
+        )
+
+    if rtype in {"downsize_instance", "switch_instance_class", "stop_or_schedule"}:
+        return (
+            [
+                "Review observed utilization and maintenance requirements",
+                "Select a lower-cost instance plan aligned to demand",
+                "Apply change in maintenance window and monitor latency/error budgets",
+            ],
+            "30-60 minutes",
+            "medium",
+        )
+
+    if rtype in {"enable_encryption", "add_lifecycle_policy", "move_to_ia_or_glacier"}:
+        return (
+            [
+                "Review bucket data sensitivity and access patterns",
+                "Apply encryption and lifecycle transitions in policy-as-code where possible",
+                "Validate object access and storage-class transitions after rollout",
+            ],
+            "20-50 minutes",
+            "medium",
+        )
+
+    if rtype in {"reduce_memory", "set_reserved_concurrency", "optimize_runtime"}:
+        return (
+            [
+                "Review invocation volume, duration, and concurrency behavior",
+                "Apply incremental runtime configuration changes",
+                "Observe error rate, duration, and throttling before wider rollout",
+            ],
+            "20-45 minutes",
+            "medium",
+        )
+
     return (
         [
             "Review resource configuration",
@@ -456,6 +537,46 @@ def _credibility_pair(recommendation_type: str, recommendation_category: str, es
     )
 
 
+def _impact_story_for_recommendation(recommendation_type: str) -> dict[str, str]:
+    rtype = (recommendation_type or "").strip().lower()
+    if rtype in {
+        "attach_targets_or_cleanup",
+        "investigate_unhealthy_targets",
+        "fix_health_check_configuration",
+        "load_balancer_review_target_health",
+        "load_balancer_cleanup_unused",
+    }:
+        return {
+            "why_this_matters": "Traffic reliability depends on healthy and reachable backends.",
+            "expected_impact": "Reduces outage risk and improves request success rate.",
+            "risk_if_ignored": "Users may experience intermittent failures or complete service loss.",
+        }
+    if rtype in {
+        "downsize_instance",
+        "switch_instance_class",
+        "stop_or_schedule",
+        "reduce_memory",
+        "set_reserved_concurrency",
+        "optimize_runtime",
+    }:
+        return {
+            "why_this_matters": "Sizing and runtime settings directly affect cost and performance.",
+            "expected_impact": "Improves efficiency with lower waste and steadier performance.",
+            "risk_if_ignored": "Continued overspend or degraded latency under load.",
+        }
+    if rtype in {"enable_encryption", "add_lifecycle_policy", "move_to_ia_or_glacier"}:
+        return {
+            "why_this_matters": "Storage posture influences both security and long-term spend.",
+            "expected_impact": "Strengthens data protection and can reduce storage costs over time.",
+            "risk_if_ignored": "Higher exposure risk and avoidable storage growth costs.",
+        }
+    return {
+        "why_this_matters": "This recommendation addresses a validated operational risk.",
+        "expected_impact": "Improves security, reliability, or cost posture.",
+        "risk_if_ignored": "Risk may compound and become harder to remediate later.",
+    }
+
+
 def recommendation_read_from_orm(
     rec: Recommendation,
     rank: int | None,
@@ -463,6 +584,10 @@ def recommendation_read_from_orm(
 ) -> RecommendationRead:
     """Build API model with rank-derived why_it_matters (not stored on the row)."""
     steps, estimated_time, difficulty = guided_actions_for_type(rec.recommendation_type)
+    payload_evidence = dict(evidence_json or {})
+    for k, v in _impact_story_for_recommendation(rec.recommendation_type).items():
+        payload_evidence.setdefault(k, v)
+
     return RecommendationRead(
         id=rec.id,
         resource_id=rec.resource_id,
@@ -505,7 +630,7 @@ def recommendation_read_from_orm(
         applied_by=None,
         applied_at=None,
         execution_notes=None,
-        evidence_json=evidence_json or None,
+        evidence_json=payload_evidence or None,
     )
 
 
@@ -569,15 +694,24 @@ def _recommendation_category_for_type(recommendation_type: str) -> str:
         "aurora_serverless_cost_review",
         "lambda_rightsize_memory",
         "s3_add_lifecycle_policy",
+        "add_lifecycle_policy",
         "nat_gateway_cost_review",
         "waf_cost_review",
         "ec2_review_stopped_instance",
+        "downsize_instance",
+        "switch_instance_class",
+        "stop_or_schedule",
+        "move_to_ia_or_glacier",
+        "reduce_memory",
     }:
         return "cost"
     if recommendation_type in {
         "rds_disable_public_access",
         "s3_enable_public_access_block",
         "s3_enable_versioning",
+        "enable_encryption",
+        "set_reserved_concurrency",
+        "optimize_runtime",
         "acm_review_certificate_expiry",
         "cloudfront_review_insecure_protocol_policy",
         "cloudfront_enforce_https_redirect",
@@ -599,6 +733,9 @@ def _recommendation_category_for_type(recommendation_type: str) -> str:
         "target_group_review_target_health",
         "target_group_enable_stickiness",
         "target_group_optimize_deregistration_delay",
+        "attach_targets_or_cleanup",
+        "investigate_unhealthy_targets",
+        "fix_health_check_configuration",
         "rds_parameter_group_enable_slow_query_log",
         "rds_parameter_group_disable_general_log",
     }:
@@ -899,6 +1036,84 @@ def _build_recommendation_for_finding(
             risk_level="high",
             confidence_score="high",
             recommended_action="Fix target health and validate at least one healthy backend per target group.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "load_balancer_no_healthy_traffic_path":
+        rtype = "load_balancer_review_target_health"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Restore healthy load balancer traffic path",
+            explanation=(
+                "Listeners currently forward to target groups without healthy backends. "
+                "Restore at least one healthy path to avoid request failures."
+            ),
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Fix target registrations, health checks, and backend readiness for active listeners.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "load_balancer_unused":
+        rtype = "load_balancer_cleanup_unused"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review unused or partially configured load balancer",
+            explanation=(
+                "This load balancer appears to have incomplete traffic wiring. "
+                "Confirm intent and clean up unused resources to reduce operational noise."
+            ),
+            risk_level="low",
+            confidence_score="medium",
+            recommended_action="Attach missing listeners/targets or decommission if no longer required.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "load_balancer_partial_failure":
+        rtype = "load_balancer_review_target_health"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Investigate partial target failure behind load balancer",
+            explanation=(
+                "Some targets are unhealthy while others remain healthy, indicating degraded service quality "
+                "and elevated incident risk."
+            ),
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Identify failing backends and stabilize target health before traffic shifts.",
             estimated_savings=estimated_savings,
             savings_basis=sb,
             confidence_reason=cr,
@@ -1461,6 +1676,308 @@ def _build_recommendation_for_finding(
             created_at=created_at,
         )
 
+    if finding.finding_type == "target_group_no_targets":
+        rtype = "attach_targets_or_cleanup"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Attach targets to target group or clean up",
+            explanation="This target group has no registered targets and cannot serve application traffic.",
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Register active backends or remove the target group if obsolete.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "target_group_unhealthy_targets":
+        rtype = "investigate_unhealthy_targets"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Investigate unhealthy targets in target group",
+            explanation="Unhealthy targets were detected. Resolve backend readiness and health-check failures.",
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Use target health reason codes to fix app, network, or check-path issues.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "target_group_misconfigured_health_check":
+        rtype = "fix_health_check_configuration"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Fix target group health check configuration",
+            explanation="Health check settings appear weak or incomplete and may delay failure detection.",
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Tune protocol/path/threshold values to match service behavior.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "rds_low_cpu_underutilized":
+        rtype = "downsize_instance"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Downsize underutilized RDS instance",
+            explanation="Observed CPU utilization is consistently low relative to current instance sizing.",
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Evaluate a smaller instance class and validate performance before production rollout.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "rds_high_storage_unused":
+        rtype = "switch_instance_class"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review RDS storage allocation and instance plan",
+            explanation="A high portion of allocated storage appears unused over the observed window.",
+            risk_level="low",
+            confidence_score="medium",
+            recommended_action="Right-size storage and class mix to align with actual consumption and growth.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "rds_idle_instance_candidate":
+        rtype = "stop_or_schedule"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review idle RDS instance for stop/schedule",
+            explanation="Instance shows low activity signals and may be a candidate for schedule-based operation.",
+            risk_level="low",
+            confidence_score="medium",
+            recommended_action="Confirm business-hours usage and apply stop/schedule policy where supported.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "s3_missing_encryption":
+        rtype = "enable_encryption"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Enable default encryption on S3 bucket",
+            explanation="Bucket default encryption is not enabled and data at rest may be inadequately protected.",
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Enable SSE (SSE-S3 or SSE-KMS) and enforce encryption on uploads.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "s3_no_lifecycle_large_bucket":
+        rtype = "add_lifecycle_policy"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Add lifecycle policy to large S3 bucket",
+            explanation="Large bucket detected without lifecycle automation, increasing long-term storage cost.",
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Define transition and retention rules aligned to data access patterns.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "s3_infrequent_access_candidate":
+        rtype = "move_to_ia_or_glacier"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Move cold S3 data to IA/Glacier classes",
+            explanation="Storage profile indicates potential for colder storage classes at lower unit cost.",
+            risk_level="low",
+            confidence_score="medium",
+            recommended_action="Apply lifecycle transitions to IA/Glacier with restore-time requirements in mind.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "lambda_low_utilization":
+        rtype = "reduce_memory"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Reduce Lambda configuration for low utilization",
+            explanation="Function invocation volume is low, indicating opportunity to trim allocated runtime resources.",
+            risk_level="low",
+            confidence_score="medium",
+            recommended_action="Tune memory and timeout based on observed invocation characteristics.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "lambda_excessive_memory_allocation":
+        rtype = "reduce_memory"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Right-size Lambda memory allocation",
+            explanation="Configured memory appears high for observed execution duration profile.",
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Lower memory incrementally and monitor duration/error impact.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "lambda_concurrency_risk":
+        rtype = "set_reserved_concurrency"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Set Lambda reserved concurrency safeguards",
+            explanation="Observed concurrency peaks without guardrails can affect downstream stability.",
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Define reserved concurrency to cap noisy-neighbor impact and protect critical flows.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type in {"public_subnet_with_open_sg", "internet_exposed_resource_chain"}:
+        rtype = "security_group_restrict_world_open_ports"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Break internet exposure chain across network controls",
+            explanation=(
+                "Combined route and security-group posture indicates possible internet exposure path. "
+                "Restrict ingress and validate subnet routing intent."
+            ),
+            risk_level="high",
+            confidence_score="medium",
+            recommended_action="Tighten SG ingress and review IGW default routes for associated subnets.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
     if finding.finding_type == "target_group_stickiness_disabled":
         rtype = "target_group_enable_stickiness"
         rcat = _recommendation_category_for_type(rtype)
@@ -1602,8 +2119,25 @@ _RECOMMENDATION_SOURCE_FINDING_TYPES = (
     "lambda_outdated_runtime",
     "lambda_review_timeout_configuration",
     "target_group_no_healthy_targets",
+    "target_group_no_targets",
+    "target_group_unhealthy_targets",
+    "target_group_misconfigured_health_check",
     "target_group_stickiness_disabled",
     "target_group_slow_deregistration",
+    "load_balancer_no_healthy_traffic_path",
+    "load_balancer_unused",
+    "load_balancer_partial_failure",
+    "rds_low_cpu_underutilized",
+    "rds_high_storage_unused",
+    "rds_idle_instance_candidate",
+    "s3_missing_encryption",
+    "s3_no_lifecycle_large_bucket",
+    "s3_infrequent_access_candidate",
+    "lambda_low_utilization",
+    "lambda_excessive_memory_allocation",
+    "lambda_concurrency_risk",
+    "public_subnet_with_open_sg",
+    "internet_exposed_resource_chain",
     "rds_parameter_group_slow_query_disabled",
     "rds_parameter_group_general_log_enabled",
 )

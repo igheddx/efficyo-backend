@@ -14,9 +14,13 @@ def build_finding_evidence(
     approval_required: bool,
     execution_eligible: bool,
     evidence: dict[str, Any],
+    impact_summary: str | None = None,
+    savings_estimate: float | None = None,
+    risk_explanation: str | None = None,
+    linked_resources: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Canonical finding payload for resource-agnostic pipeline processing."""
-    return {
+    payload = {
         "title": title,
         "summary": summary,
         "category": category,
@@ -27,3 +31,12 @@ def build_finding_evidence(
         "execution_eligible": execution_eligible,
         "evidence": evidence,
     }
+    if impact_summary:
+        payload["impact_summary"] = impact_summary
+    if isinstance(savings_estimate, (int, float)):
+        payload["savings_estimate"] = float(savings_estimate)
+    if risk_explanation:
+        payload["risk_explanation"] = risk_explanation
+    if linked_resources:
+        payload["linked_resources"] = linked_resources
+    return payload

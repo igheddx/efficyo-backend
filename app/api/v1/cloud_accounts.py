@@ -36,6 +36,13 @@ from app.schemas.cloud_account import (
     TopOpportunityRead,
     InsightsRead,
 )
+from app.schemas.bulk_tagging import (
+    GroupedItemRead,
+    TaggingBatchCreateRequest,
+    TaggingBatchExecuteRead,
+    TaggingBatchExecuteRequest,
+    TaggingBatchRead,
+)
 from app.schemas.approvals import RecommendationRejectRequest
 from app.schemas.ingestion_job import IngestionJobCreate, IngestionJobRead
 from app.schemas.recommendation_outcome import (
@@ -63,6 +70,7 @@ from app.services import (
     cloud_account_service,
     cost_summary_service,
     detection_service,
+    bulk_tagging_service,
     ingestion_job_service,
     ingestion_service,
     outcome_impact_service,
@@ -99,6 +107,10 @@ def _min_access_for_cloud_route(request: Request) -> str | None:
         return None
     method = request.method.upper()
     if path.endswith("/approve") or path.endswith("/reject"):
+        return "approver"
+    if "/tagging-batches" in path and path.endswith("/execute"):
+        return "admin"
+    if "/tagging-batches" in path and method == "POST":
         return "approver"
     if path.endswith("/tag-values"):
         return "approver"
@@ -746,6 +758,26 @@ def list_findings_endpoint(
     return [FindingRead.model_validate(item) for item in findings]
 
 
+@router.get("/{cloud_account_id}/findings/grouped", response_model=list[GroupedItemRead], status_code=status.HTTP_200_OK)
+def list_grouped_findings_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    db_session: Session = Depends(get_db),
+) -> list[GroupedItemRead]:
+    try:
+        findings = detection_service.list_findings(db_session, tenant_id, cloud_account_id)
+    except ValueError as exc:
+        error_msg = str(exc)
+        if error_msg == "tenant_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found") from exc
+        if error_msg == "cloud_account_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
+        raise
+
+    grouped = bulk_tagging_service.grouped_findings(findings=findings)
+    return [GroupedItemRead.model_validate(item) for item in grouped]
+
+
 @router.post("/{cloud_account_id}/recommend/rds", response_model=RecommendationRunRead, status_code=status.HTTP_200_OK)
 def recommend_rds_endpoint(
     tenant_id: UUID,
@@ -934,6 +966,176 @@ def list_recommendations_endpoint(
         raise
 
     return recommendations
+
+
+@router.get(
+    "/{cloud_account_id}/recommendations/grouped",
+    response_model=list[GroupedItemRead],
+    status_code=status.HTTP_200_OK,
+)
+def list_grouped_recommendations_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    latest_only: bool = Query(default=True),
+    db_session: Session = Depends(get_db),
+) -> list[GroupedItemRead]:
+    try:
+        recommendations = recommendation_service.list_recommendation_reads(
+            db_session,
+            tenant_id,
+            cloud_account_id,
+            latest_only=latest_only,
+        )
+    except ValueError as exc:
+        error_msg = str(exc)
+        if error_msg == "tenant_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found") from exc
+        if error_msg == "cloud_account_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
+        raise
+
+    grouped = bulk_tagging_service.grouped_recommendations(
+        db_session,
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+        recommendation_reads=recommendations,
+    )
+    return [GroupedItemRead.model_validate(item) for item in grouped]
+
+
+@router.post("/{cloud_account_id}/tagging-batches", response_model=TaggingBatchRead, status_code=status.HTTP_201_CREATED)
+def create_tagging_batch_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    body: TaggingBatchCreateRequest,
+    db_session: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_user_context),
+) -> TaggingBatchRead:
+    org_id = tenant_scope_service.require_data_access_organization_id(db_session, ctx)
+    try:
+        batch = bulk_tagging_service.create_tagging_batch(
+            db_session,
+            organization_id=org_id,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            recommendation_type=body.recommendation_type,
+            title=body.title,
+            required_tag_keys=body.required_tag_keys,
+            shared_tag_values=body.shared_tag_values,
+            resources=[x.model_dump(mode="python") for x in body.resources],
+            approver_user_ids=body.approver_user_ids,
+            execution_owner_user_id=body.execution_owner_user_id,
+            submitted_by=ctx.email,
+            submitted_by_role=ctx.role,
+            notes=body.notes,
+        )
+    except ValueError as exc:
+        mapping = {
+            "recommendation_not_found": (status.HTTP_404_NOT_FOUND, "One or more recommendations were not found."),
+            "recommendation_type_mismatch": (
+                status.HTTP_400_BAD_REQUEST,
+                "All selected recommendations must match the same recommendation type.",
+            ),
+            "open_approval_request_exists": (
+                status.HTTP_409_CONFLICT,
+                "An open approval request already exists for one of the selected recommendations.",
+            ),
+            "no_approvers": (status.HTTP_400_BAD_REQUEST, "Select at least one approver."),
+            "approver_not_in_org": (status.HTTP_400_BAD_REQUEST, "An approver is not in the organization."),
+            "approver_ineligible_role": (status.HTTP_400_BAD_REQUEST, "An approver is not eligible for this account."),
+            "execution_owner_not_in_org": (status.HTTP_400_BAD_REQUEST, "Execution owner is not in the organization."),
+            "execution_owner_ineligible_role": (status.HTTP_400_BAD_REQUEST, "Execution owner is not eligible for this account."),
+            "tag_values_required_for_tag_recommendation": (
+                status.HTTP_400_BAD_REQUEST,
+                "Shared tag values are required before submitting a tagging batch.",
+            ),
+            "recommendation_not_pending": (
+                status.HTTP_409_CONFLICT,
+                "A selected recommendation is not in a submittable workflow state.",
+            ),
+        }
+        if str(exc) in mapping:
+            code, detail = mapping[str(exc)]
+            raise HTTPException(status_code=code, detail=detail) from exc
+        raise
+
+    return TaggingBatchRead.model_validate(batch)
+
+
+@router.get("/{cloud_account_id}/tagging-batches", response_model=list[TaggingBatchRead], status_code=status.HTTP_200_OK)
+def list_tagging_batches_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    db_session: Session = Depends(get_db),
+) -> list[TaggingBatchRead]:
+    rows = bulk_tagging_service.list_batches(
+        db_session,
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+    )
+    return [TaggingBatchRead.model_validate(row) for row in rows]
+
+
+@router.get(
+    "/{cloud_account_id}/tagging-batches/{batch_id}",
+    response_model=TaggingBatchRead,
+    status_code=status.HTTP_200_OK,
+)
+def get_tagging_batch_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    batch_id: UUID,
+    db_session: Session = Depends(get_db),
+) -> TaggingBatchRead:
+    row = bulk_tagging_service.get_batch(
+        db_session,
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+        batch_id=batch_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tagging batch not found")
+    return TaggingBatchRead.model_validate(row)
+
+
+@router.post(
+    "/{cloud_account_id}/tagging-batches/{batch_id}/execute",
+    response_model=TaggingBatchExecuteRead,
+    status_code=status.HTTP_200_OK,
+)
+def execute_tagging_batch_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    batch_id: UUID,
+    body: TaggingBatchExecuteRequest | None = None,
+    db_session: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_user_context),
+) -> TaggingBatchExecuteRead:
+    try:
+        result = bulk_tagging_service.execute_batch(
+            db_session,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            batch_id=batch_id,
+            actor_email=ctx.email,
+            actor_role=ctx.role,
+            execution_notes=body.execution_notes if body else None,
+        )
+    except ValueError as exc:
+        mapping = {
+            "batch_not_found": (status.HTTP_404_NOT_FOUND, "Tagging batch not found."),
+            "batch_without_approval_request": (status.HTTP_409_CONFLICT, "Batch has no approval request."),
+            "approval_request_not_found": (status.HTTP_409_CONFLICT, "Approval request not found."),
+            "batch_not_approved": (
+                status.HTTP_409_CONFLICT,
+                "Bulk execution is blocked until all required approvers approve this batch.",
+            ),
+        }
+        if str(exc) in mapping:
+            code, detail = mapping[str(exc)]
+            raise HTTPException(status_code=code, detail=detail) from exc
+        raise
+    return TaggingBatchExecuteRead.model_validate(result)
 
 
 @router.get("/{cloud_account_id}/recommendations/top", response_model=list[TopOpportunityRead], status_code=status.HTTP_200_OK)

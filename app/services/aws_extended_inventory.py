@@ -613,6 +613,7 @@ def _elbv2_one_region(role_arn: str, region: str, external_id: str | None = None
 
             target_group_arns: list[str] = []
             healthy_target_count = 0
+            unhealthy_target_count = 0
             try:
                 tg_paginator = client.get_paginator("describe_target_groups")
                 for tg_page in tg_paginator.paginate(LoadBalancerArn=lb_arn):
@@ -627,10 +628,34 @@ def _elbv2_one_region(role_arn: str, region: str, external_id: str | None = None
                                 state = str((desc.get("TargetHealth") or {}).get("State") or "").lower()
                                 if state == "healthy":
                                     healthy_target_count += 1
+                                elif state == "unhealthy":
+                                    unhealthy_target_count += 1
                         except (ClientError, BotoCoreError):
                             continue
             except (ClientError, BotoCoreError):
                 target_group_arns = []
+
+            listener_count = 0
+            listener_protocols: list[str] = []
+            listener_forward_action_count = 0
+            listener_redirect_action_count = 0
+            try:
+                listener_paginator = client.get_paginator("describe_listeners")
+                for l_page in listener_paginator.paginate(LoadBalancerArn=lb_arn):
+                    for listener in l_page.get("Listeners", []) or []:
+                        listener_count += 1
+                        proto = str(listener.get("Protocol") or "").strip()
+                        if proto:
+                            listener_protocols.append(proto)
+                        for action in listener.get("DefaultActions", []) or []:
+                            atype = str(action.get("Type") or "").strip().lower()
+                            if atype == "forward":
+                                listener_forward_action_count += 1
+                            elif atype == "redirect":
+                                listener_redirect_action_count += 1
+            except (ClientError, BotoCoreError):
+                listener_count = 0
+                listener_protocols = []
 
             linked_resources = [
                 _linked_resource_ref(
@@ -661,6 +686,11 @@ def _elbv2_one_region(role_arn: str, region: str, external_id: str | None = None
                         "deletion_protection_enabled": deletion_protection_enabled,
                         "target_group_count": len(target_group_arns),
                         "healthy_target_count": healthy_target_count,
+                        "unhealthy_target_count": unhealthy_target_count,
+                        "listener_count": listener_count,
+                        "listener_protocols": sorted(set(listener_protocols)),
+                        "listener_forward_action_count": listener_forward_action_count,
+                        "listener_redirect_action_count": listener_redirect_action_count,
                         "linked_resources": linked_resources,
                     },
                     tags_json=tags,
@@ -697,15 +727,28 @@ def _target_groups_one_region(role_arn: str, region: str, external_id: str | Non
                 healthy_count = 0
                 unhealthy_count = 0
                 total_count = 0
+                target_health_states: dict[str, int] = {}
+                registered_targets: list[dict[str, Any]] = []
                 try:
                     health_resp = client.describe_target_health(TargetGroupArn=tg_arn)
                     for target_health in health_resp.get("TargetHealthDescriptions", []) or []:
                         state = str((target_health.get("TargetHealth") or {}).get("State") or "").lower()
                         total_count += 1
+                        target_health_states[state] = int(target_health_states.get(state) or 0) + 1
                         if state == "healthy":
                             healthy_count += 1
                         elif state == "unhealthy":
                             unhealthy_count += 1
+                        target = target_health.get("Target") or {}
+                        registered_targets.append(
+                            {
+                                "id": target.get("Id"),
+                                "port": target.get("Port"),
+                                "az": target.get("AvailabilityZone"),
+                                "state": state,
+                                "reason": str((target_health.get("TargetHealth") or {}).get("Reason") or ""),
+                            }
+                        )
                 except (ClientError, BotoCoreError):
                     pass
                 
@@ -731,6 +774,18 @@ def _target_groups_one_region(role_arn: str, region: str, external_id: str | Non
                 # Parse stickiness
                 stickiness_enabled = attributes.get("stickiness.enabled", "false").lower() == "true"
                 stickiness_type = attributes.get("stickiness.type", "").lower()
+                linked_lb_arn = ""
+                lb_arns = tg.get("LoadBalancerArns") or []
+                if lb_arns:
+                    linked_lb_arn = str(lb_arns[0] or "").strip()
+
+                tags: dict[str, str] = {}
+                try:
+                    tag_resp = client.describe_tags(ResourceArns=[tg_arn])
+                    tag_desc = (tag_resp.get("TagDescriptions") or [{}])[0]
+                    tags = _normalize_tags(tag_desc.get("Tags", []))
+                except (ClientError, BotoCoreError):
+                    tags = {}
                 
                 out.append(
                     _resource_envelope(
@@ -743,20 +798,27 @@ def _target_groups_one_region(role_arn: str, region: str, external_id: str | Non
                             "port": tg.get("Port"),
                             "vpc_id": tg.get("VpcId"),
                             "target_type": tg.get("TargetType"),
+                            "target_group_arn": tg_arn,
+                            "load_balancer_arn": linked_lb_arn,
+                            "load_balancer_arns": [str(x) for x in lb_arns if x],
                             "healthy_count": healthy_count,
                             "unhealthy_count": unhealthy_count,
                             "total_targets": total_count,
+                            "target_health_states": target_health_states,
+                            "registered_targets": registered_targets,
                             "health_check_enabled": tg.get("HealthCheckEnabled"),
                             "health_check_protocol": tg.get("HealthCheckProtocol"),
                             "health_check_path": tg.get("HealthCheckPath"),
                             "health_check_interval_seconds": tg.get("HealthCheckIntervalSeconds"),
+                            "health_check_timeout_seconds": tg.get("HealthCheckTimeoutSeconds"),
                             "healthy_threshold_count": tg.get("HealthyThresholdCount"),
                             "unhealthy_threshold_count": tg.get("UnhealthyThresholdCount"),
+                            "health_check_matcher": (tg.get("Matcher") or {}).get("HttpCode"),
                             "stickiness_enabled": stickiness_enabled,
                             "stickiness_type": stickiness_type,
                             "deregistration_delay_seconds": deregistration_delay,
                         },
-                        tags_json=_normalize_tags(tg.get("Tags", [])),
+                        tags_json=tags,
                     )
                 )
     except (ClientError, BotoCoreError) as e:

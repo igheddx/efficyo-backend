@@ -574,6 +574,19 @@ def approve_assignment(
         except ValueError as exc:
             if str(exc) != "recommendation_not_found":
                 raise
+        try:
+            from app.services import bulk_tagging_service
+
+            bulk_tagging_service.on_approval_request_approved(
+                db,
+                approval_request_id=req.id,
+                approved_by=last_email,
+                approved_role=eff,
+                approved_membership_role=org_membership_role_label(actor_role),
+                approved_access_role=eff,
+            )
+        except Exception:
+            logger.debug("bulk tagging approval hook skipped", exc_info=True)
     else:
         req.status = "partially_approved"
         req.updated_at = now
@@ -653,6 +666,16 @@ def reject_assignment(
         err = str(exc)
         if err not in {"recommendation_not_found", "cannot_reject_applied_or_verified"}:
             raise
+    try:
+        from app.services import bulk_tagging_service
+
+        bulk_tagging_service.on_approval_request_rejected(
+            db,
+            approval_request_id=req.id,
+            reason=reason,
+        )
+    except Exception:
+        logger.debug("bulk tagging reject hook skipped", exc_info=True)
 
     db.commit()
     db.refresh(req)

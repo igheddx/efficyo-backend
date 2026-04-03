@@ -243,12 +243,14 @@ def detect_extended_findings(
                 )
             )
 
+    world_open_sg_ids: list[str] = []
     for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "security_group"):
         cfg = snapshot.configuration_json or {}
         has_open_sensitive = bool(
             cfg.get("has_world_open_ssh") or cfg.get("has_world_open_rdp") or cfg.get("has_world_open_all_ports")
         )
         if has_open_sensitive:
+            world_open_sg_ids.append(str(snapshot.resource_id))
             findings.append(
                 Finding(
                     tenant_id=tenant_id,
@@ -289,6 +291,9 @@ def detect_extended_findings(
         deletion_protection_enabled = bool(cfg.get("deletion_protection_enabled"))
         target_group_count = int(cfg.get("target_group_count") or 0)
         healthy_target_count = int(cfg.get("healthy_target_count") or 0)
+        unhealthy_target_count = int(cfg.get("unhealthy_target_count") or 0)
+        listener_count = int(cfg.get("listener_count") or 0)
+        listener_forward_action_count = int(cfg.get("listener_forward_action_count") or 0)
         lb_name = str(cfg.get("load_balancer_name") or snapshot.resource_id)
 
         if not deletion_protection_enabled:
@@ -359,12 +364,130 @@ def detect_extended_findings(
                 )
             )
 
+        if listener_count > 0 and target_group_count > 0 and listener_forward_action_count > 0 and healthy_target_count == 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="load_balancer_no_healthy_traffic_path",
+                    severity="high",
+                    evidence_json=build_finding_evidence(
+                        title="Load balancer has no healthy traffic path",
+                        summary=(
+                            f"Load balancer {lb_name} has listeners and target groups, but none of the "
+                            "forwarding paths currently lead to healthy targets."
+                        ),
+                        category="reliability",
+                        risk="high",
+                        confidence="high",
+                        recommendation_seed="load_balancer_review_target_health",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "load_balancer_name": lb_name,
+                            "listener_count": listener_count,
+                            "target_group_count": target_group_count,
+                            "healthy_target_count": healthy_target_count,
+                            "listener_forward_action_count": listener_forward_action_count,
+                            "linked_resources": list(cfg.get("linked_resources") or []),
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if listener_count == 0 or target_group_count == 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="load_balancer_unused",
+                    severity="low",
+                    evidence_json=build_finding_evidence(
+                        title="Load balancer appears unused",
+                        summary=(
+                            f"Load balancer {lb_name} has incomplete traffic configuration (missing listeners "
+                            "or target groups), suggesting it may be unused or partially configured."
+                        ),
+                        category="governance",
+                        risk="low",
+                        confidence="medium",
+                        recommendation_seed="load_balancer_review_target_health",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "load_balancer_name": lb_name,
+                            "listener_count": listener_count,
+                            "target_group_count": target_group_count,
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if healthy_target_count > 0 and unhealthy_target_count > 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="load_balancer_partial_failure",
+                    severity="medium",
+                    evidence_json=build_finding_evidence(
+                        title="Load balancer has partial backend failure",
+                        summary=(
+                            f"Load balancer {lb_name} has both healthy and unhealthy targets, indicating "
+                            "degraded backend reliability."
+                        ),
+                        category="reliability",
+                        risk="medium",
+                        confidence="high",
+                        recommendation_seed="load_balancer_review_target_health",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "load_balancer_name": lb_name,
+                            "healthy_target_count": healthy_target_count,
+                            "unhealthy_target_count": unhealthy_target_count,
+                            "linked_resources": list(cfg.get("linked_resources") or []),
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    public_subnet_ids: set[str] = set()
+    route_table_with_public_default: list[tuple[ResourceSnapshot, dict]] = []
+    subnet_by_id = {
+        str(s.resource_id): (s.configuration_json or {})
+        for s in _latest_snapshots(db_session, tenant_id, cloud_account_id, "subnet")
+    }
     for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "route_table"):
         cfg = snapshot.configuration_json or {}
         association_count = int(cfg.get("association_count") or 0)
         has_igw_default_route = bool(cfg.get("has_igw_default_route"))
         has_nat_default_route = bool(cfg.get("has_nat_default_route"))
         linked_resources = list(cfg.get("linked_resources") or [])
+
+        if has_igw_default_route:
+            route_table_with_public_default.append((snapshot, cfg))
+            for linked in linked_resources:
+                if str(linked.get("resource_type") or "") != "subnet":
+                    continue
+                sid = str(linked.get("resource_id") or "").strip()
+                if sid:
+                    public_subnet_ids.add(sid)
 
         if association_count == 0:
             findings.append(
@@ -439,6 +562,116 @@ def detect_extended_findings(
         total_targets = int(cfg.get("total_targets") or 0)
         stickiness_enabled = bool(cfg.get("stickiness_enabled"))
         deregistration_delay_seconds = int(cfg.get("deregistration_delay_seconds") or 30)
+        health_check_enabled = bool(cfg.get("health_check_enabled"))
+        health_check_interval_seconds = int(cfg.get("health_check_interval_seconds") or 0)
+        health_check_timeout_seconds = int(cfg.get("health_check_timeout_seconds") or 0)
+        unhealthy_threshold_count = int(cfg.get("unhealthy_threshold_count") or 0)
+
+        if total_targets == 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="target_group_no_targets",
+                    severity="medium",
+                    evidence_json=build_finding_evidence(
+                        title="Target group has no registered targets",
+                        summary=(
+                            f"Target group {tg_name} has no registered targets and cannot receive application traffic."
+                        ),
+                        category="reliability",
+                        risk="medium",
+                        confidence="high",
+                        recommendation_seed="attach_targets_or_cleanup",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "target_group_name": tg_name,
+                            "total_targets": total_targets,
+                            "load_balancer_arn": cfg.get("load_balancer_arn"),
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if unhealthy_count > 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="target_group_unhealthy_targets",
+                    severity="high",
+                    evidence_json=build_finding_evidence(
+                        title="Target group has unhealthy targets",
+                        summary=(
+                            f"Target group {tg_name} has unhealthy backends that can degrade or fail user traffic."
+                        ),
+                        category="reliability",
+                        risk="high",
+                        confidence="high",
+                        recommendation_seed="investigate_unhealthy_targets",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "target_group_name": tg_name,
+                            "healthy_count": healthy_count,
+                            "unhealthy_count": unhealthy_count,
+                            "target_health_states": cfg.get("target_health_states") or {},
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if (
+            not health_check_enabled
+            or health_check_interval_seconds <= 0
+            or health_check_timeout_seconds <= 0
+            or unhealthy_threshold_count <= 0
+        ):
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="target_group_misconfigured_health_check",
+                    severity="medium",
+                    evidence_json=build_finding_evidence(
+                        title="Target group health check appears misconfigured",
+                        summary=(
+                            f"Target group {tg_name} has missing or weak health check settings that may delay "
+                            "failure detection."
+                        ),
+                        category="reliability",
+                        risk="medium",
+                        confidence="medium",
+                        recommendation_seed="fix_health_check_configuration",
+                        approval_required=False,
+                        execution_eligible=True,
+                        evidence={
+                            "target_group_name": tg_name,
+                            "health_check_enabled": health_check_enabled,
+                            "health_check_interval_seconds": health_check_interval_seconds,
+                            "health_check_timeout_seconds": health_check_timeout_seconds,
+                            "unhealthy_threshold_count": unhealthy_threshold_count,
+                            "health_check_path": cfg.get("health_check_path"),
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
 
         if total_targets > 0 and healthy_count == 0:
             findings.append(
@@ -531,6 +764,87 @@ def detect_extended_findings(
                         evidence={
                             "target_group_name": tg_name,
                             "deregistration_delay_seconds": deregistration_delay_seconds,
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    if world_open_sg_ids and public_subnet_ids:
+        example_public_subnets = sorted(public_subnet_ids)[:10]
+        for sg_snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "security_group"):
+            if str(sg_snapshot.resource_id) not in set(world_open_sg_ids):
+                continue
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=sg_snapshot.id,
+                    resource_id=sg_snapshot.resource_id,
+                    resource_type=sg_snapshot.resource_type,
+                    finding_type="public_subnet_with_open_sg",
+                    severity="high",
+                    evidence_json=build_finding_evidence(
+                        title="Public subnet exposure combined with open security group",
+                        summary=(
+                            "Detected public subnet routing to an internet gateway while a security group exposes "
+                            "sensitive ingress to the internet."
+                        ),
+                        category="security",
+                        risk="high",
+                        confidence="medium",
+                        recommendation_seed="security_group_restrict_world_open_ports",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "security_group_id": str(sg_snapshot.resource_id),
+                            "public_subnet_ids": example_public_subnets,
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    if world_open_sg_ids and route_table_with_public_default:
+        sg_set = sorted(set(world_open_sg_ids))
+        for rt_snapshot, rt_cfg in route_table_with_public_default:
+            linked = list(rt_cfg.get("linked_resources") or [])
+            associated_subnets = [
+                str(x.get("resource_id") or "")
+                for x in linked
+                if str(x.get("resource_type") or "") == "subnet"
+            ]
+            has_public_launch_subnet = any(bool((subnet_by_id.get(s) or {}).get("map_public_ip_on_launch")) for s in associated_subnets)
+            if not associated_subnets and not has_public_launch_subnet:
+                continue
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=rt_snapshot.id,
+                    resource_id=rt_snapshot.resource_id,
+                    resource_type=rt_snapshot.resource_type,
+                    finding_type="internet_exposed_resource_chain",
+                    severity="high",
+                    evidence_json=build_finding_evidence(
+                        title="Internet exposure chain detected",
+                        summary=(
+                            "Detected an exposure chain across route table, public subnet behavior, and "
+                            "world-open security groups."
+                        ),
+                        category="security",
+                        risk="high",
+                        confidence="medium",
+                        recommendation_seed="route_table_review_public_egress",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "route_table_id": str(rt_snapshot.resource_id),
+                            "associated_subnets": associated_subnets,
+                            "world_open_security_groups": sg_set,
+                            "has_igw_default_route": bool(rt_cfg.get("has_igw_default_route")),
                         },
                     ),
                     detected_at=detected_at,

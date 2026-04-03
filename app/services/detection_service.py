@@ -261,6 +261,9 @@ def detect_rds_findings(
             db_instance_class = configuration.get("db_instance_class")
             raw_env = tags.get("Environment")
             environment = raw_env.strip() if isinstance(raw_env, str) and raw_env.strip() else "unknown"
+            cpu_avg_7d = configuration.get("cpu_utilization_avg_7d")
+            db_connections_avg_7d = configuration.get("db_connections_avg_7d")
+            storage_free_ratio_7d = configuration.get("storage_free_ratio_7d")
 
             if db_instance_class in OVERPROVISIONED_RDS_INSTANCE_TYPES:
                 evidence = {"db_instance_class": db_instance_class, "environment": environment}
@@ -279,6 +282,69 @@ def detect_rds_findings(
                             evidence_json=evidence,
                             resource_type=snapshot.resource_type,
                         ),
+                        detected_at=detected_at,
+                        sync_run_id=sync_run_id,
+                    )
+                )
+
+            if isinstance(cpu_avg_7d, (int, float)) and float(cpu_avg_7d) < 8.0:
+                findings.append(
+                    Finding(
+                        tenant_id=tenant_id,
+                        cloud_account_id=cloud_account_id,
+                        resource_snapshot_id=snapshot.id,
+                        resource_id=snapshot.resource_id,
+                        resource_type=snapshot.resource_type,
+                        finding_type="rds_low_cpu_underutilized",
+                        severity="medium",
+                        evidence_json={
+                            "db_instance_class": db_instance_class,
+                            "cpu_utilization_avg_7d": float(cpu_avg_7d),
+                            "environment": environment,
+                        },
+                        detected_at=detected_at,
+                        sync_run_id=sync_run_id,
+                    )
+                )
+
+            if isinstance(storage_free_ratio_7d, (int, float)) and float(storage_free_ratio_7d) >= 0.70:
+                findings.append(
+                    Finding(
+                        tenant_id=tenant_id,
+                        cloud_account_id=cloud_account_id,
+                        resource_snapshot_id=snapshot.id,
+                        resource_id=snapshot.resource_id,
+                        resource_type=snapshot.resource_type,
+                        finding_type="rds_high_storage_unused",
+                        severity="low",
+                        evidence_json={
+                            "allocated_storage_gb": configuration.get("allocated_storage"),
+                            "storage_free_ratio_7d": float(storage_free_ratio_7d),
+                        },
+                        detected_at=detected_at,
+                        sync_run_id=sync_run_id,
+                    )
+                )
+
+            if (
+                isinstance(cpu_avg_7d, (int, float))
+                and isinstance(db_connections_avg_7d, (int, float))
+                and float(cpu_avg_7d) < 3.0
+                and float(db_connections_avg_7d) < 2.0
+            ):
+                findings.append(
+                    Finding(
+                        tenant_id=tenant_id,
+                        cloud_account_id=cloud_account_id,
+                        resource_snapshot_id=snapshot.id,
+                        resource_id=snapshot.resource_id,
+                        resource_type=snapshot.resource_type,
+                        finding_type="rds_idle_instance_candidate",
+                        severity="low",
+                        evidence_json={
+                            "cpu_utilization_avg_7d": float(cpu_avg_7d),
+                            "db_connections_avg_7d": float(db_connections_avg_7d),
+                        },
                         detected_at=detected_at,
                         sync_run_id=sync_run_id,
                     )
@@ -500,7 +566,80 @@ def detect_lambda_findings(
                         "vpc_link_status": _vpc_link_status(vpc_id, subnet_ids, sg_ids, linked_resources),
                         "linked_resources": linked_resources,
                     },
-                    estimated_savings=10,
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        invocations_sum_7d = configuration.get("invocations_sum_7d")
+        duration_avg_ms_7d = configuration.get("duration_avg_ms_7d")
+        concurrent_executions_max_7d = configuration.get("concurrent_executions_max_7d")
+        reserved_concurrency = configuration.get("reserved_concurrency")
+
+        if isinstance(invocations_sum_7d, (int, float)) and float(invocations_sum_7d) < 100:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="lambda_low_utilization",
+                    severity="low",
+                    evidence_json={
+                        "invocations_sum_7d": float(invocations_sum_7d),
+                        "memory_size": memory_size,
+                        "linked_resources": linked_resources,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if (
+            isinstance(memory_size, (int, float))
+            and memory_size >= 1024
+            and isinstance(duration_avg_ms_7d, (int, float))
+            and float(duration_avg_ms_7d) < 500.0
+        ):
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="lambda_excessive_memory_allocation",
+                    severity="medium",
+                    evidence_json={
+                        "memory_size": memory_size,
+                        "duration_avg_ms_7d": float(duration_avg_ms_7d),
+                        "linked_resources": linked_resources,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if (
+            isinstance(concurrent_executions_max_7d, (int, float))
+            and float(concurrent_executions_max_7d) >= 50.0
+            and reserved_concurrency is None
+        ):
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="lambda_concurrency_risk",
+                    severity="medium",
+                    evidence_json={
+                        "concurrent_executions_max_7d": float(concurrent_executions_max_7d),
+                        "reserved_concurrency": reserved_concurrency,
+                        "linked_resources": linked_resources,
+                    },
                     detected_at=detected_at,
                     sync_run_id=sync_run_id,
                 )
@@ -673,7 +812,68 @@ def detect_s3_findings(
                     finding_type="s3_lifecycle_policy_missing",
                     severity="medium",
                     evidence_json={"lifecycle_rules_count": lifecycle_rules_count},
-                    estimated_savings=5,
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if configuration.get("encryption_enabled") is False:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="s3_missing_encryption",
+                    severity="high",
+                    evidence_json={
+                        "encryption_enabled": False,
+                        "bucket_name": snapshot.resource_id,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        bucket_size_bytes = configuration.get("bucket_size_bytes_approx")
+        if (
+            lifecycle_rules_count == 0
+            and isinstance(bucket_size_bytes, (int, float))
+            and float(bucket_size_bytes) >= float(50 * 1024 * 1024 * 1024)
+        ):
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="s3_no_lifecycle_large_bucket",
+                    severity="medium",
+                    evidence_json={
+                        "bucket_size_bytes_approx": float(bucket_size_bytes),
+                        "lifecycle_rules_count": lifecycle_rules_count,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if isinstance(bucket_size_bytes, (int, float)) and float(bucket_size_bytes) >= float(100 * 1024 * 1024 * 1024):
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="s3_infrequent_access_candidate",
+                    severity="low",
+                    evidence_json={
+                        "bucket_size_bytes_approx": float(bucket_size_bytes),
+                        "storage_class_focus": "STANDARD",
+                    },
                     detected_at=detected_at,
                     sync_run_id=sync_run_id,
                 )

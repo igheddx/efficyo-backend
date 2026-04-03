@@ -22,6 +22,7 @@ from app.models.recommendation import Recommendation
 from app.models.recommendation_outcome import RecommendationOutcome
 from app.models.resource_snapshot import ResourceSnapshot
 from app.models.sync_pipeline import SyncJob, SyncJobEvent, SyncTask
+from app.models.tagging_batch import TaggingBatch, TaggingBatchResource
 from app.models.tenant import Tenant
 from app.models.user import AuthSession, User
 
@@ -51,6 +52,8 @@ __all__ = [
 	"SyncJob",
 	"SyncJobEvent",
 	"SyncTask",
+	"TaggingBatch",
+	"TaggingBatchResource",
 	"Tenant",
 	"AuthSession",
 	"User",
