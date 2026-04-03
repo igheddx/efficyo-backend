@@ -51,6 +51,7 @@ def db() -> Generator[Session, None, None]:
     from app.models.execution_policy import ExecutionPolicy  # noqa: F401
     from app.models.account_tag_key import AccountTagKey  # noqa: F401
     from app.models.cost_snapshot import CostApiUsageLog, CostFetchLock, CostSnapshot, CostSyncPolicy  # noqa: F401
+    from app.models.tagging_batch import TaggingBatch, TaggingBatchResource  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     session = TestingSessionLocal()

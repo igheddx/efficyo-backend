@@ -26,6 +26,8 @@ class User(Base):
     password_hash = Column(Text, nullable=True)
     display_name = Column(String(255), nullable=False)
     status = Column(String(20), nullable=False, default="active")
+    must_change_password = Column(Boolean, nullable=False, default=False)
+    temporary_password_expires_at = Column(DateTime(timezone=True), nullable=True)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
     is_root_admin = Column(Boolean, nullable=False, default=False)
     auth_provider = Column(String(64), nullable=False, default="local")

@@ -50,7 +50,11 @@ def _demo_role_aws_fallback(role_arn: str, exc: BaseException) -> bool:
     return True
 
 
-def fetch_daily_unblended_cost_by_service(role_arn: str, days: int = 14) -> list[dict]:
+def fetch_daily_unblended_cost_by_service(
+    role_arn: str,
+    days: int = 14,
+    external_id: str | None = None,
+) -> list[dict]:
     """
     Last ``days`` of unblended cost per day per service (Cost Explorer DAILY + SERVICE group by).
 
@@ -65,6 +69,7 @@ def fetch_daily_unblended_cost_by_service(role_arn: str, days: int = 14) -> list
             role_arn=role_arn,
             region=_COST_EXPLORER_REGION,
             session_name=f"fptnext-cost-explorer-daily-{window_days}",
+            external_id=external_id,
         )
 
         ce_client = boto3.client(
@@ -124,25 +129,28 @@ def fetch_daily_unblended_cost_by_service(role_arn: str, days: int = 14) -> list
         raise
 
 
-def fetch_daily_unblended_cost_by_service_last_14_days(role_arn: str) -> list[dict]:
-    return fetch_daily_unblended_cost_by_service(role_arn=role_arn, days=14)
+def fetch_daily_unblended_cost_by_service_last_14_days(
+    role_arn: str,
+    external_id: str | None = None,
+) -> list[dict]:
+    return fetch_daily_unblended_cost_by_service(role_arn=role_arn, days=14, external_id=external_id)
 
 
-def rolling_30d_unblended_account_total_decimal(role_arn: str) -> Decimal | None:
+def rolling_30d_unblended_account_total_decimal(role_arn: str, external_id: str | None = None) -> Decimal | None:
     """
     Total UnblendedCost for the same rolling 30d window as ``fetch_cost_summary`` (account-wide headline total).
 
     Used for proof-of-savings before/after snapshots so numbers align with dashboard cost context.
     """
     try:
-        summary = fetch_cost_summary(role_arn)
+        summary = fetch_cost_summary(role_arn, external_id=external_id)
         return Decimal(str(summary.get("total_cost", 0)))
     except Exception:
         logger.exception("rolling_30d_unblended_account_total_decimal failed")
         return None
 
 
-def fetch_cost_summary(role_arn: str) -> dict:
+def fetch_cost_summary(role_arn: str, external_id: str | None = None) -> dict:
     """Fetch rolling account-window unblended AWS cost grouped by service (UTC dates, same as EC2-Other)."""
     start_date, end_date = account_default_ce_period()
 
@@ -151,6 +159,7 @@ def fetch_cost_summary(role_arn: str) -> dict:
             role_arn=role_arn,
             region=_COST_EXPLORER_REGION,
             session_name="fptnext-cost-explorer",
+            external_id=external_id,
         )
 
         ce_client = boto3.client(
@@ -218,9 +227,9 @@ def fetch_cost_summary(role_arn: str) -> dict:
         raise
 
 
-def fetch_aws_waf_monthly_cost(role_arn: str) -> float:
+def fetch_aws_waf_monthly_cost(role_arn: str, external_id: str | None = None) -> float:
     """Last-30-days unblended AWS WAF spend from the same cost-by-service data as ``fetch_cost_summary``."""
-    summary = fetch_cost_summary(role_arn)
+    summary = fetch_cost_summary(role_arn, external_id=external_id)
     total = Decimal("0.00")
     for item in summary.get("by_service", []):
         name = (item.get("service") or "").strip()
@@ -241,7 +250,7 @@ def _categorize_ec2_other_usage_type(usage_type: str) -> str:
     return "Other"
 
 
-def fetch_ec2_other_breakdown(role_arn: str) -> dict:
+def fetch_ec2_other_breakdown(role_arn: str, external_id: str | None = None) -> dict:
     """EC2-Other unblended cost by usage category for the same window as headline account cost."""
     start_date, end_date = account_default_ce_period()
 
@@ -250,6 +259,7 @@ def fetch_ec2_other_breakdown(role_arn: str) -> dict:
             role_arn=role_arn,
             region=_COST_EXPLORER_REGION,
             session_name="fptnext-cost-explorer",
+            external_id=external_id,
         )
 
         ce_client = boto3.client(

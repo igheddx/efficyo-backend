@@ -7,6 +7,7 @@ import re
 _AWS_ACCOUNT_ID = re.compile(r"^\d{12}$")
 # Role ARN: arn:aws:iam::<12 digits>:role/<path...>
 _ROLE_ARN = re.compile(r"^arn:aws:iam::(\d{12}):role/.+$")
+_EXTERNAL_ID = re.compile(r"^[\w+=,.@:/-]{2,1224}$")
 
 
 def normalize_aws_account_id(value: str) -> str:
@@ -45,3 +46,14 @@ def validate_region_default(region: str) -> str:
     if len(rl) > 64 or not re.match(r"^[a-z0-9-]+$", rl):
         raise ValueError("Region must use lowercase letters, digits, and hyphens only (max 64 characters).")
     return rl
+
+
+def validate_external_id(external_id: str | None) -> str | None:
+    t = (external_id or "").strip()
+    if not t:
+        return None
+    if not _EXTERNAL_ID.match(t):
+        raise ValueError(
+            "External ID may use letters, digits, and +=,.@:/- only (2-1224 characters)."
+        )
+    return t

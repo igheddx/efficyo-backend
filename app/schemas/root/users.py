@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.password_policy import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH
+
 
 class RootMembershipBrief(BaseModel):
     organization_id: UUID
@@ -31,7 +33,12 @@ class RootGlobalUserRow(BaseModel):
 class RootUserCreate(BaseModel):
     organization_id: UUID
     email: str = Field(..., min_length=3, max_length=320)
-    password: str = Field(..., min_length=8, max_length=256)
+    password: str | None = Field(
+        None,
+        min_length=PASSWORD_MIN_LENGTH,
+        max_length=PASSWORD_MAX_LENGTH,
+        description="Deprecated: ignored for new users.",
+    )
     display_name: str | None = Field(None, max_length=255)
     role: str = Field(..., description="org_admin, approver, or viewer")
 
@@ -57,4 +64,4 @@ class RootUserDetail(BaseModel):
 
 
 class RootUserStatusUpdate(BaseModel):
-    status: str = Field(..., pattern="^(active|disabled)$")
+    status: str = Field(..., pattern="^(active|pending|disabled)$")

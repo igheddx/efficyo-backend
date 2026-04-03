@@ -80,6 +80,39 @@ class TestAwsValidationService:
         mock_sts_client.assume_role.assert_called_once()
 
     @patch("app.services.aws_validation_service.boto3.client")
+    def test_validate_cloud_account_role_passes_external_id(self, mock_boto3_client):
+        """Test AWS role validation forwards ExternalId to STS AssumeRole."""
+        mock_sts_client = MagicMock()
+        mock_boto3_client.return_value = mock_sts_client
+
+        mock_sts_client.assume_role.return_value = {
+            "Credentials": {
+                "AccessKeyId": "ASIAIOSFODNN7EXAMPLE",
+                "SecretAccessKey": "example_secret",
+                "SessionToken": "example_token",
+            }
+        }
+        mock_sts_client.get_caller_identity.return_value = {
+            "Account": "123456789012",
+            "Arn": "arn:aws:iam::123456789012:user/test",
+            "UserId": "AIDACKCEVSQ6C2EXAMPLE",
+        }
+
+        result = aws_validation_service.validate_cloud_account_role(
+            "arn:aws:iam::123456789012:role/fptnext-validator",
+            region="us-east-1",
+            external_id="tenant-external-id-123",
+        )
+
+        assert result.success is True
+        mock_sts_client.assume_role.assert_called_once_with(
+            RoleArn="arn:aws:iam::123456789012:role/fptnext-validator",
+            RoleSessionName="fptnext-validation",
+            DurationSeconds=900,
+            ExternalId="tenant-external-id-123",
+        )
+
+    @patch("app.services.aws_validation_service.boto3.client")
     def test_validate_cloud_account_role_access_denied(self, mock_boto3_client):
         """Test AWS role validation with access denied."""
         from botocore.exceptions import ClientError

@@ -26,6 +26,7 @@ class AwsValidationResult:
 def validate_cloud_account_role(
     role_arn: str,
     region: str = "us-east-1",
+    external_id: str | None = None,
 ) -> AwsValidationResult:
     """
     Validate a cloud account by assuming a role and calling GetCallerIdentity.
@@ -43,6 +44,7 @@ def validate_cloud_account_role(
             role_arn=role_arn,
             region=region,
             session_name="fptnext-validation",
+            external_id=external_id,
         )
 
         # Create STS client with assumed credentials

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
@@ -21,12 +22,12 @@ _SKIPPABLE_REGION_ERRORS = frozenset({
 })
 
 
-def _inventory_regions(role_arn: str, home_region: str) -> list[str]:
+def _inventory_regions(role_arn: str, home_region: str, external_id: str | None = None) -> list[str]:
     """Regions to scan: either the cloud account default only, or all commercial regions for the account."""
     if not settings.aws_scan_all_regions:
         return [home_region]
     try:
-        ec2 = _create_assumed_client("ec2", role_arn=role_arn, region=home_region)
+        ec2 = _create_assumed_client("ec2", role_arn=role_arn, region=home_region, external_id=external_id)
         resp = ec2.describe_regions(AllRegions=False)
         names = sorted({r["RegionName"] for r in resp.get("Regions", [])})
         return names if names else [home_region]
@@ -43,8 +44,9 @@ def _gather_per_region(
     home_region: str,
     fetch_one_region: Callable[[str], list[dict]],
     label: str,
+    external_id: str | None = None,
 ) -> list[dict]:
-    regions = _inventory_regions(role_arn, home_region)
+    regions = _inventory_regions(role_arn, home_region, external_id=external_id)
     merged: list[dict] = []
     for reg in regions:
         try:
@@ -68,12 +70,13 @@ def _gather_per_region(
     return merged
 
 
-def _create_assumed_client(service_name: str, role_arn: str, region: str):
+def _create_assumed_client(service_name: str, role_arn: str, region: str, external_id: str | None = None):
     """Create a boto3 client using assumed role credentials."""
     credentials = aws_assume_role_service.assume_role(
         role_arn=role_arn,
         region=region,
         session_name="fptnext-inventory",
+        external_id=external_id,
     )
     return boto3.client(
         service_name,
@@ -92,6 +95,75 @@ def _normalize_tags(tag_list: list[dict] | None) -> dict:
         if key:
             tags[key] = tag.get("Value", "")
     return tags
+
+
+def _cw_average_7d(cloudwatch_client, namespace: str, metric_name: str, dimensions: list[dict]) -> float | None:
+    """Best-effort 7d average metric query; returns None when unavailable."""
+    try:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=7)
+        resp = cloudwatch_client.get_metric_statistics(
+            Namespace=namespace,
+            MetricName=metric_name,
+            Dimensions=dimensions,
+            StartTime=start,
+            EndTime=end,
+            Period=86400,
+            Statistics=["Average"],
+        )
+        points = resp.get("Datapoints") or []
+        vals = [float(p.get("Average")) for p in points if p.get("Average") is not None]
+        if not vals:
+            return None
+        return sum(vals) / len(vals)
+    except Exception:
+        return None
+
+
+def _cw_sum_7d(cloudwatch_client, namespace: str, metric_name: str, dimensions: list[dict]) -> float | None:
+    """Best-effort 7d summed metric query; returns None when unavailable."""
+    try:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=7)
+        resp = cloudwatch_client.get_metric_statistics(
+            Namespace=namespace,
+            MetricName=metric_name,
+            Dimensions=dimensions,
+            StartTime=start,
+            EndTime=end,
+            Period=86400,
+            Statistics=["Sum"],
+        )
+        points = resp.get("Datapoints") or []
+        vals = [float(p.get("Sum")) for p in points if p.get("Sum") is not None]
+        if not vals:
+            return None
+        return sum(vals)
+    except Exception:
+        return None
+
+
+def _cw_max_7d(cloudwatch_client, namespace: str, metric_name: str, dimensions: list[dict]) -> float | None:
+    """Best-effort 7d max metric query; returns None when unavailable."""
+    try:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=7)
+        resp = cloudwatch_client.get_metric_statistics(
+            Namespace=namespace,
+            MetricName=metric_name,
+            Dimensions=dimensions,
+            StartTime=start,
+            EndTime=end,
+            Period=86400,
+            Statistics=["Maximum"],
+        )
+        points = resp.get("Datapoints") or []
+        vals = [float(p.get("Maximum")) for p in points if p.get("Maximum") is not None]
+        if not vals:
+            return None
+        return max(vals)
+    except Exception:
+        return None
 
 
 def _fetch_rds_tags_for_arn(rds_client, resource_arn: str | None, resource_id: str) -> dict:
@@ -138,8 +210,8 @@ def _fetch_lambda_tags_for_arn(lambda_client, function_arn: str | None, resource
         return {}
 
 
-def _fetch_ec2_instances_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2_client = _create_assumed_client("ec2", role_arn=role_arn, region=region)
+def _fetch_ec2_instances_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2_client = _create_assumed_client("ec2", role_arn=role_arn, region=region, external_id=external_id)
     paginator = ec2_client.get_paginator("describe_instances")
     page_iterator = paginator.paginate()
     instances = []
@@ -151,7 +223,7 @@ def _fetch_ec2_instances_one_region(role_arn: str, region: str) -> list[dict]:
     return instances
 
 
-def fetch_ec2_instances(role_arn: str, region: str) -> list[dict]:
+def fetch_ec2_instances(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """
     Fetch EC2 instances from an AWS account using role assumption.
 
@@ -165,9 +237,9 @@ def fetch_ec2_instances(role_arn: str, region: str) -> list[dict]:
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_ec2_instances_one_region(role_arn, reg)
+            return _fetch_ec2_instances_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "EC2")
+        return _gather_per_region(role_arn, region, _one, "EC2", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -181,8 +253,12 @@ def fetch_ec2_instances(role_arn: str, region: str) -> list[dict]:
         raise
 
 
-def _fetch_rds_instances_one_region(role_arn: str, region: str) -> list[dict]:
-    rds_client = _create_assumed_client("rds", role_arn=role_arn, region=region)
+def _fetch_rds_instances_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    rds_client = _create_assumed_client("rds", role_arn=role_arn, region=region, external_id=external_id)
+    try:
+        cloudwatch_client = _create_assumed_client("cloudwatch", role_arn=role_arn, region=region, external_id=external_id)
+    except Exception:
+        cloudwatch_client = None
     paginator = rds_client.get_paginator("describe_db_instances")
     instances = []
     for page in paginator.paginate():
@@ -193,19 +269,19 @@ def _fetch_rds_instances_one_region(role_arn: str, region: str) -> list[dict]:
                 db_instance.get("DBInstanceArn"),
                 resource_id,
             )
-            instances.append(_normalize_rds_instance(db_instance, region, tags))
+            instances.append(_normalize_rds_instance(db_instance, region, tags, cloudwatch_client))
     logger.info("Fetched %d RDS DB instances from %s", len(instances), region)
     return instances
 
 
-def fetch_rds_instances(role_arn: str, region: str) -> list[dict]:
+def fetch_rds_instances(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch RDS DB instances and normalize them to snapshot format (optionally all regions)."""
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_rds_instances_one_region(role_arn, reg)
+            return _fetch_rds_instances_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "RDS")
+        return _gather_per_region(role_arn, region, _one, "RDS", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -219,8 +295,8 @@ def fetch_rds_instances(role_arn: str, region: str) -> list[dict]:
         raise
 
 
-def _fetch_aurora_clusters_one_region(role_arn: str, region: str) -> list[dict]:
-    rds_client = _create_assumed_client("rds", role_arn=role_arn, region=region)
+def _fetch_aurora_clusters_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    rds_client = _create_assumed_client("rds", role_arn=role_arn, region=region, external_id=external_id)
     paginator = rds_client.get_paginator("describe_db_clusters")
     clusters = []
     for page in paginator.paginate():
@@ -236,14 +312,14 @@ def _fetch_aurora_clusters_one_region(role_arn: str, region: str) -> list[dict]:
     return clusters
 
 
-def fetch_aurora_clusters(role_arn: str, region: str) -> list[dict]:
+def fetch_aurora_clusters(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch Aurora DB clusters and normalize them to snapshot format (optionally all regions)."""
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_aurora_clusters_one_region(role_arn, reg)
+            return _fetch_aurora_clusters_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "Aurora")
+        return _gather_per_region(role_arn, region, _one, "Aurora", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -257,8 +333,12 @@ def fetch_aurora_clusters(role_arn: str, region: str) -> list[dict]:
         raise
 
 
-def _fetch_lambda_functions_one_region(role_arn: str, region: str) -> list[dict]:
-    lambda_client = _create_assumed_client("lambda", role_arn=role_arn, region=region)
+def _fetch_lambda_functions_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    lambda_client = _create_assumed_client("lambda", role_arn=role_arn, region=region, external_id=external_id)
+    try:
+        cloudwatch_client = _create_assumed_client("cloudwatch", role_arn=role_arn, region=region, external_id=external_id)
+    except Exception:
+        cloudwatch_client = None
     paginator = lambda_client.get_paginator("list_functions")
     functions = []
     for page in paginator.paginate():
@@ -269,19 +349,19 @@ def _fetch_lambda_functions_one_region(role_arn: str, region: str) -> list[dict]
                 function.get("FunctionArn"),
                 resource_id,
             )
-            functions.append(_normalize_lambda_function(function, region, tags))
+            functions.append(_normalize_lambda_function(function, region, tags, lambda_client, cloudwatch_client))
     logger.info("Fetched %d Lambda functions from %s", len(functions), region)
     return functions
 
 
-def fetch_lambda_functions(role_arn: str, region: str) -> list[dict]:
+def fetch_lambda_functions(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch Lambda functions and normalize them to snapshot format (optionally all regions)."""
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_lambda_functions_one_region(role_arn, reg)
+            return _fetch_lambda_functions_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "Lambda")
+        return _gather_per_region(role_arn, region, _one, "Lambda", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -295,8 +375,8 @@ def fetch_lambda_functions(role_arn: str, region: str) -> list[dict]:
         raise
 
 
-def _fetch_ebs_volumes_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2_client = _create_assumed_client("ec2", role_arn=role_arn, region=region)
+def _fetch_ebs_volumes_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2_client = _create_assumed_client("ec2", role_arn=role_arn, region=region, external_id=external_id)
     paginator = ec2_client.get_paginator("describe_volumes")
     volumes = []
     for page in paginator.paginate():
@@ -306,14 +386,14 @@ def _fetch_ebs_volumes_one_region(role_arn: str, region: str) -> list[dict]:
     return volumes
 
 
-def fetch_ebs_volumes(role_arn: str, region: str) -> list[dict]:
+def fetch_ebs_volumes(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch EBS volumes and normalize them to snapshot format (optionally all regions)."""
     try:
 
         def _one(reg: str) -> list[dict]:
-            return _fetch_ebs_volumes_one_region(role_arn, reg)
+            return _fetch_ebs_volumes_one_region(role_arn, reg, external_id)
 
-        return _gather_per_region(role_arn, region, _one, "EBS")
+        return _gather_per_region(role_arn, region, _one, "EBS", external_id=external_id)
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]
         error_msg = exc.response["Error"]["Message"]
@@ -364,22 +444,41 @@ def _normalize_instance(instance: dict, region: str) -> dict:
     }
 
 
-def _normalize_rds_instance(db_instance: dict, region: str, tags: dict | None = None) -> dict:
+def _normalize_rds_instance(db_instance: dict, region: str, tags: dict | None = None, cloudwatch_client=None) -> dict:
     """Normalize an RDS DB instance to snapshot format."""
+    db_instance_identifier = db_instance.get("DBInstanceIdentifier", "unknown")
+    cpu_avg_7d = None
+    db_connections_avg_7d = None
+    free_storage_bytes_avg_7d = None
+    storage_free_ratio_7d = None
+    allocated_storage = db_instance.get("AllocatedStorage")
+    if cloudwatch_client is not None and db_instance_identifier:
+        dims = [{"Name": "DBInstanceIdentifier", "Value": str(db_instance_identifier)}]
+        cpu_avg_7d = _cw_average_7d(cloudwatch_client, "AWS/RDS", "CPUUtilization", dims)
+        db_connections_avg_7d = _cw_average_7d(cloudwatch_client, "AWS/RDS", "DatabaseConnections", dims)
+        free_storage_bytes_avg_7d = _cw_average_7d(cloudwatch_client, "AWS/RDS", "FreeStorageSpace", dims)
+    if isinstance(allocated_storage, (int, float)) and allocated_storage > 0 and isinstance(free_storage_bytes_avg_7d, (int, float)):
+        total_bytes = float(allocated_storage) * 1024.0 * 1024.0 * 1024.0
+        storage_free_ratio_7d = min(max(float(free_storage_bytes_avg_7d) / total_bytes, 0.0), 1.0)
+
     configuration = {
         "engine": db_instance.get("Engine", ""),
         "db_instance_class": db_instance.get("DBInstanceClass", ""),
-        "allocated_storage": db_instance.get("AllocatedStorage"),
+        "allocated_storage": allocated_storage,
         "storage_type": db_instance.get("StorageType", ""),
         "multi_az": db_instance.get("MultiAZ"),
         "publicly_accessible": db_instance.get("PubliclyAccessible"),
         "db_cluster_identifier": db_instance.get("DBClusterIdentifier"),
         "db_instance_status": db_instance.get("DBInstanceStatus", ""),
         "availability_zone": db_instance.get("AvailabilityZone", ""),
+        "cpu_utilization_avg_7d": cpu_avg_7d,
+        "db_connections_avg_7d": db_connections_avg_7d,
+        "free_storage_bytes_avg_7d": free_storage_bytes_avg_7d,
+        "storage_free_ratio_7d": storage_free_ratio_7d,
     }
 
     return {
-        "resource_id": db_instance.get("DBInstanceIdentifier", "unknown"),
+        "resource_id": db_instance_identifier,
         "resource_type": "rds_instance",
         "region": region,
         "configuration_json": configuration,
@@ -408,18 +507,47 @@ def _normalize_aurora_cluster(db_cluster: dict, region: str, tags: dict | None =
     }
 
 
-def _normalize_lambda_function(function: dict, region: str, tags: dict | None = None) -> dict:
+def _normalize_lambda_function(
+    function: dict,
+    region: str,
+    tags: dict | None = None,
+    lambda_client=None,
+    cloudwatch_client=None,
+) -> dict:
     """Normalize a Lambda function to snapshot format."""
     vpc_cfg = function.get("VpcConfig") or {}
     subnet_ids = [str(x) for x in (vpc_cfg.get("SubnetIds") or []) if x]
     security_group_ids = [str(x) for x in (vpc_cfg.get("SecurityGroupIds") or []) if x]
     vpc_id = str(vpc_cfg.get("VpcId") or "") or None
+    function_name = function.get("FunctionName", "unknown")
+    function_arn = function.get("FunctionArn", "")
+    invocations_sum_7d = None
+    duration_avg_ms_7d = None
+    concurrent_executions_max_7d = None
+    reserved_concurrency = None
+    if cloudwatch_client is not None and function_name:
+        dims = [{"Name": "FunctionName", "Value": str(function_name)}]
+        invocations_sum_7d = _cw_sum_7d(cloudwatch_client, "AWS/Lambda", "Invocations", dims)
+        duration_avg_ms_7d = _cw_average_7d(cloudwatch_client, "AWS/Lambda", "Duration", dims)
+        concurrent_executions_max_7d = _cw_max_7d(cloudwatch_client, "AWS/Lambda", "ConcurrentExecutions", dims)
+    if lambda_client is not None and function_name:
+        try:
+            c = lambda_client.get_function_concurrency(FunctionName=function_name)
+            if "ReservedConcurrentExecutions" in c:
+                reserved_concurrency = c.get("ReservedConcurrentExecutions")
+        except Exception:
+            reserved_concurrency = None
+
     configuration = {
         "runtime": function.get("Runtime", ""),
         "memory_size": function.get("MemorySize"),
         "timeout": function.get("Timeout"),
         "last_modified": function.get("LastModified", ""),
-        "function_arn": function.get("FunctionArn", ""),
+        "function_arn": function_arn,
+        "invocations_sum_7d": invocations_sum_7d,
+        "duration_avg_ms_7d": duration_avg_ms_7d,
+        "concurrent_executions_max_7d": concurrent_executions_max_7d,
+        "reserved_concurrency": reserved_concurrency,
         "vpc_config": {
             "vpc_id": vpc_id,
             "subnet_ids": subnet_ids,
@@ -433,7 +561,7 @@ def _normalize_lambda_function(function: dict, region: str, tags: dict | None = 
     }
 
     return {
-        "resource_id": function.get("FunctionName", "unknown"),
+        "resource_id": function_name,
         "resource_type": "lambda_function",
         "region": region,
         "configuration_json": configuration,
@@ -466,17 +594,21 @@ def _normalize_ebs_volume(volume: dict, region: str) -> dict:
     }
 
 
-def fetch_s3_buckets(role_arn: str, region: str) -> list[dict]:
+def fetch_s3_buckets(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
     """Fetch S3 buckets and normalize them to snapshot format."""
     try:
-        s3_client = _create_assumed_client("s3", role_arn=role_arn, region=region)
+        s3_client = _create_assumed_client("s3", role_arn=role_arn, region=region, external_id=external_id)
 
+        try:
+            cloudwatch_client = _create_assumed_client("cloudwatch", role_arn=role_arn, region="us-east-1", external_id=external_id)
+        except Exception:
+            cloudwatch_client = None
         response = s3_client.list_buckets()
         buckets = []
         for bucket in response.get("Buckets", []):
             bucket_name = bucket.get("Name", "unknown")
             tags = _fetch_s3_bucket_tags(s3_client, bucket_name)
-            buckets.append(_normalize_s3_bucket(bucket, region, s3_client, tags))
+            buckets.append(_normalize_s3_bucket(bucket, region, s3_client, tags, cloudwatch_client))
 
         logger.info(f"Fetched {len(buckets)} S3 buckets")
         return buckets
@@ -523,7 +655,7 @@ def _fetch_s3_bucket_tags(s3_client, bucket_name: str) -> dict:
         raise
 
 
-def _normalize_s3_bucket(bucket: dict, region: str, s3_client, tags: dict | None = None) -> dict:
+def _normalize_s3_bucket(bucket: dict, region: str, s3_client, tags: dict | None = None, cloudwatch_client=None) -> dict:
     """Normalize an S3 bucket to snapshot format."""
     bucket_name = bucket.get("Name", "unknown")
 
@@ -531,6 +663,7 @@ def _normalize_s3_bucket(bucket: dict, region: str, s3_client, tags: dict | None
     encryption_enabled = False
     public_access_block_status = {}
     lifecycle_rules_count = 0
+    bucket_size_bytes_approx = None
 
     try:
         versioning_response = s3_client.get_bucket_versioning(Bucket=bucket_name)
@@ -562,11 +695,24 @@ def _normalize_s3_bucket(bucket: dict, region: str, s3_client, tags: dict | None
     except Exception:
         pass
 
+    if cloudwatch_client is not None and bucket_name:
+        bucket_dims = [
+            {"Name": "BucketName", "Value": bucket_name},
+            {"Name": "StorageType", "Value": "StandardStorage"},
+        ]
+        bucket_size_bytes_approx = _cw_average_7d(
+            cloudwatch_client,
+            "AWS/S3",
+            "BucketSizeBytes",
+            bucket_dims,
+        )
+
     configuration = {
         "versioning_status": versioning_status,
         "encryption_enabled": encryption_enabled,
         "public_access_block_status": public_access_block_status if public_access_block_status else None,
         "lifecycle_rules_count": lifecycle_rules_count,
+        "bucket_size_bytes_approx": bucket_size_bytes_approx,
     }
 
     return {
