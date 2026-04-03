@@ -12,6 +12,7 @@ from app.schemas.organization import OrgMembershipRead
 from app.schemas.root.common import Paginated
 from app.schemas.root.dashboard import RootDashboardSummary
 from app.schemas.root.ops import RootAlertThresholds, RootAlertThresholdsPatch
+from app.schemas.root.resource_coverage import RootResourceCoverageSummary
 from app.schemas.root.orgs import (
     RootOrganizationCreate,
     RootOrganizationDetail,
@@ -25,7 +26,13 @@ from app.schemas.root.users import (
     RootUserStatusUpdate,
 )
 from app.services import org_service
-from app.services.root import dashboard_service, ops_service, orgs_service, users_service
+from app.services.root import (
+    dashboard_service,
+    ops_service,
+    orgs_service,
+    resource_coverage_service,
+    users_service,
+)
 
 router = APIRouter(prefix="/root", tags=["root-admin"])
 
@@ -34,12 +41,14 @@ def _member_read(m) -> OrgMembershipRead:
     user = getattr(m, "user", None)
     email = user.email if user is not None else m.user_identifier
     display_name = user.display_name if user is not None else None
+    user_status = (user.status if user is not None else "active") or "active"
     return OrgMembershipRead(
         id=m.id,
         organization_id=m.organization_id,
         user_id=m.user_id,
         email=email,
         display_name=display_name,
+        user_status=user_status,
         role=m.role,
         created_at=m.created_at,
         updated_at=m.updated_at,
@@ -52,6 +61,13 @@ def root_dashboard(
     _ctx: UserContext = Depends(require_platform_root),
 ) -> RootDashboardSummary:
     return RootDashboardSummary.model_validate(dashboard_service.root_dashboard_summary(db_session))
+
+
+@router.get("/resource-coverage", response_model=RootResourceCoverageSummary)
+def root_resource_coverage(
+    _ctx: UserContext = Depends(require_platform_root),
+) -> RootResourceCoverageSummary:
+    return resource_coverage_service.build_resource_coverage_summary()
 
 
 @router.get("/alerts/thresholds", response_model=RootAlertThresholds)
@@ -177,10 +193,10 @@ def root_list_users(
     search: str | None = Query(None),
     org_id: UUID | None = Query(None),
     role: str | None = Query(None),
-    user_status: str | None = Query(None, description="active or disabled"),
+    user_status: str | None = Query(None, description="active, pending, or disabled"),
 ) -> Paginated[RootGlobalUserRow]:
     st = user_status.strip().lower() if user_status else None
-    if st is not None and st not in {"active", "disabled"}:
+    if st is not None and st not in {"active", "pending", "disabled"}:
         st = None
     items, total = users_service.list_root_global_users(
         db_session,

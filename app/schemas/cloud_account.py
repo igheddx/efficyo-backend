@@ -8,6 +8,7 @@ from app.core.aws_field_validation import (
     account_id_from_role_arn,
     normalize_aws_account_id,
     validate_aws_account_id,
+    validate_external_id,
     validate_region_default,
     validate_role_arn,
 )
@@ -18,6 +19,7 @@ class CloudAccountCreate(BaseModel):
     account_id: str = Field(..., min_length=1, max_length=32)
     name: str = Field(..., min_length=1, max_length=255)
     role_arn: str = Field(..., min_length=1, max_length=512)
+    external_id: str | None = Field(default=None, max_length=1224)
     region_default: str = Field(..., min_length=1, max_length=64)
     trigger_initial_sync: bool = False
 
@@ -34,6 +36,11 @@ class CloudAccountCreate(BaseModel):
         if v is None:
             raise ValueError("role_arn is required")
         return validate_role_arn(str(v))
+
+    @field_validator("external_id", mode="before")
+    @classmethod
+    def _coerce_external_id(cls, v: str | None) -> str | None:
+        return validate_external_id(None if v is None else str(v))
 
     @field_validator("region_default", mode="before")
     @classmethod
@@ -53,6 +60,7 @@ class CloudAccountCreate(BaseModel):
 class CloudAccountTestConnectionRequest(BaseModel):
     account_id: str = Field(..., min_length=1, max_length=32)
     role_arn: str = Field(..., min_length=1, max_length=512)
+    external_id: str | None = Field(default=None, max_length=1224)
     region_default: str = Field(..., min_length=1, max_length=64)
 
     @field_validator("account_id", mode="before")
@@ -64,6 +72,11 @@ class CloudAccountTestConnectionRequest(BaseModel):
     @classmethod
     def _v_role(cls, v: str) -> str:
         return validate_role_arn(str(v) if v is not None else "")
+
+    @field_validator("external_id", mode="before")
+    @classmethod
+    def _v_external_id(cls, v: str | None) -> str | None:
+        return validate_external_id(None if v is None else str(v))
 
     @field_validator("region_default", mode="before")
     @classmethod

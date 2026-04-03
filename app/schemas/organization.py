@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.core.password_policy import PASSWORD_MAX_LENGTH, PASSWORD_MIN_LENGTH
+
 
 class OrganizationCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
@@ -31,6 +33,7 @@ class OrgMembershipRead(BaseModel):
     user_id: UUID | None
     email: str
     display_name: str | None = None
+    user_status: str = "active"
     role: str
     created_at: datetime
     updated_at: datetime
@@ -44,8 +47,8 @@ class OrgMembershipCreate(BaseModel):
     user_id: str | None = Field(None, max_length=320, description="Deprecated; same as email.")
     password: str | None = Field(
         None,
-        min_length=8,
-        max_length=256,
+        min_length=PASSWORD_MIN_LENGTH,
+        max_length=PASSWORD_MAX_LENGTH,
         description="Required when the account does not exist yet (local user creation).",
     )
     display_name: str | None = Field(None, max_length=255)

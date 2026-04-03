@@ -258,6 +258,7 @@ def test_cloud_account_connection_endpoint(
         body.account_id,
         body.role_arn,
         body.region_default,
+        body.external_id,
     )
     return CloudAccountTestConnectionResponse(
         success=result.success,

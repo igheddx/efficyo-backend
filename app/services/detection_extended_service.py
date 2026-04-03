@@ -1,4 +1,4 @@
-"""Extended governance/security findings for CloudFront, ACM, API Gateway, EventBridge, SES, Lambda, and VPC networking."""
+"""Extended governance/security findings for CloudFront, ACM, API Gateway, EventBridge, SES, IoT, Lambda, and VPC networking."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from app.core.db import utc_now
 from app.models.finding import Finding
 from app.models.resource_snapshot import ResourceSnapshot
 from app.services import cloud_account_service
+from app.services.finding_templates import build_finding_evidence
+from app.services.resource_capability_registry import EXTENDED_TAGGABLE_RESOURCE_TYPES
 from app.services.detection_service import DetectionRunResult, _missing_required_tags
 
 
@@ -95,21 +97,7 @@ def detect_extended_findings(
     detected_at = utc_now()
     findings: list[Finding] = []
 
-    tagged_types = [
-        "cloudfront_distribution",
-        "acm_certificate",
-        "apigateway_rest_api",
-        "apigateway_http_api",
-        "eventbridge_rule",
-        "ses_email_identity",
-        "vpc",
-        "subnet",
-        "nat_gateway",
-        "internet_gateway",
-        "security_group",
-    ]
-
-    for rt in tagged_types:
+    for rt in EXTENDED_TAGGABLE_RESOURCE_TYPES:
         for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, rt):
             tags = snapshot.tags_json or {}
             missing = _missing_required_tags(tags)
@@ -291,6 +279,260 @@ def detect_extended_findings(
                     finding_type="security_group_overly_permissive",
                     severity="medium",
                     evidence_json={"ingress_rule_count": int(cfg.get("ingress_rule_count") or 0)},
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "load_balancer"):
+        cfg = snapshot.configuration_json or {}
+        deletion_protection_enabled = bool(cfg.get("deletion_protection_enabled"))
+        target_group_count = int(cfg.get("target_group_count") or 0)
+        healthy_target_count = int(cfg.get("healthy_target_count") or 0)
+        lb_name = str(cfg.get("load_balancer_name") or snapshot.resource_id)
+
+        if not deletion_protection_enabled:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="load_balancer_deletion_protection_disabled",
+                    severity="medium",
+                    evidence_json=build_finding_evidence(
+                        title="Load balancer deletion protection is disabled",
+                        summary=(
+                            f"Load balancer {lb_name} can be deleted accidentally, increasing "
+                            "availability and recovery risk."
+                        ),
+                        category="security",
+                        risk="medium",
+                        confidence="high",
+                        recommendation_seed="load_balancer_enable_deletion_protection",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "load_balancer_name": lb_name,
+                            "scheme": cfg.get("scheme"),
+                            "type": cfg.get("type"),
+                            "deletion_protection_enabled": deletion_protection_enabled,
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if target_group_count > 0 and healthy_target_count == 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="load_balancer_no_healthy_targets",
+                    severity="high",
+                    evidence_json=build_finding_evidence(
+                        title="Load balancer has no healthy targets",
+                        summary=(
+                            f"Load balancer {lb_name} has target groups but no healthy backends, "
+                            "which can cause request failures."
+                        ),
+                        category="security",
+                        risk="high",
+                        confidence="high",
+                        recommendation_seed="load_balancer_review_target_health",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "load_balancer_name": lb_name,
+                            "target_group_count": target_group_count,
+                            "healthy_target_count": healthy_target_count,
+                            "linked_resources": list(cfg.get("linked_resources") or []),
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "route_table"):
+        cfg = snapshot.configuration_json or {}
+        association_count = int(cfg.get("association_count") or 0)
+        has_igw_default_route = bool(cfg.get("has_igw_default_route"))
+        has_nat_default_route = bool(cfg.get("has_nat_default_route"))
+        linked_resources = list(cfg.get("linked_resources") or [])
+
+        if association_count == 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="route_table_unassociated_review",
+                    severity="low",
+                    evidence_json=build_finding_evidence(
+                        title="Route table has no subnet associations",
+                        summary=(
+                            "This route table is currently not associated with any subnets and may be "
+                            "stale infrastructure that should be reviewed for cleanup."
+                        ),
+                        category="governance",
+                        risk="low",
+                        confidence="high",
+                        recommendation_seed="route_table_cleanup_unused",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "association_count": association_count,
+                            "route_count": int(cfg.get("route_count") or 0),
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if has_igw_default_route and not has_nat_default_route:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="route_table_public_default_route_review",
+                    severity="medium",
+                    evidence_json=build_finding_evidence(
+                        title="Route table has direct public default route",
+                        summary=(
+                            "This route table sends default traffic through an internet gateway without "
+                            "NAT mediation. Confirm this is intended for the attached subnets."
+                        ),
+                        category="security",
+                        risk="medium",
+                        confidence="medium",
+                        recommendation_seed="route_table_review_public_egress",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "has_igw_default_route": has_igw_default_route,
+                            "has_nat_default_route": has_nat_default_route,
+                            "linked_resources": linked_resources,
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "target_group"):
+        cfg = snapshot.configuration_json or {}
+        tg_name = str(cfg.get("target_group_name") or snapshot.resource_id)
+        healthy_count = int(cfg.get("healthy_count") or 0)
+        unhealthy_count = int(cfg.get("unhealthy_count") or 0)
+        total_targets = int(cfg.get("total_targets") or 0)
+        stickiness_enabled = bool(cfg.get("stickiness_enabled"))
+        deregistration_delay_seconds = int(cfg.get("deregistration_delay_seconds") or 30)
+
+        if total_targets > 0 and healthy_count == 0:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="target_group_no_healthy_targets",
+                    severity="high",
+                    evidence_json=build_finding_evidence(
+                        title="Target group has no healthy targets",
+                        summary=(
+                            f"Target group {tg_name} has registered targets but none are healthy. "
+                            "This will cause traffic to fail or be dropped."
+                        ),
+                        category="security",
+                        risk="high",
+                        confidence="high",
+                        recommendation_seed="target_group_review_target_health",
+                        approval_required=True,
+                        execution_eligible=False,
+                        evidence={
+                            "target_group_name": tg_name,
+                            "healthy_count": healthy_count,
+                            "unhealthy_count": unhealthy_count,
+                            "total_targets": total_targets,
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if not stickiness_enabled:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="target_group_stickiness_disabled",
+                    severity="low",
+                    evidence_json=build_finding_evidence(
+                        title="Target group has session stickiness disabled",
+                        summary=(
+                            f"Target group {tg_name} does not have session stickiness enabled. "
+                            "Enable stickiness if targets maintain stateful connections or sessions."
+                        ),
+                        category="reliability",
+                        risk="low",
+                        confidence="medium",
+                        recommendation_seed="target_group_enable_stickiness",
+                        approval_required=False,
+                        execution_eligible=True,
+                        evidence={
+                            "target_group_name": tg_name,
+                            "stickiness_enabled": stickiness_enabled,
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if deregistration_delay_seconds > 60:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="target_group_slow_deregistration",
+                    severity="low",
+                    evidence_json=build_finding_evidence(
+                        title="Target group has long deregistration delay",
+                        summary=(
+                            f"Target group {tg_name} has a deregistration delay of {deregistration_delay_seconds}s. "
+                            "Consider reducing this to minimize traffic loss during deployments."
+                        ),
+                        category="reliability",
+                        risk="low",
+                        confidence="high",
+                        recommendation_seed="target_group_optimize_deregistration_delay",
+                        approval_required=False,
+                        execution_eligible=True,
+                        evidence={
+                            "target_group_name": tg_name,
+                            "deregistration_delay_seconds": deregistration_delay_seconds,
+                        },
+                    ),
                     detected_at=detected_at,
                     sync_run_id=sync_run_id,
                 )
@@ -540,6 +782,76 @@ def detect_extended_findings(
                         "linked_resources": linked_resources,
                         "vpc_link_status": cfg.get("vpc_link_status") or "unknown",
                     },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "rds_parameter_group"):
+        cfg = snapshot.configuration_json or {}
+        pg_name = str(cfg.get("parameter_group_name") or snapshot.resource_id)
+        slow_query_enabled = bool(cfg.get("slow_query_log_enabled"))
+        general_log_enabled = bool(cfg.get("general_log_enabled"))
+
+        if not slow_query_enabled:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="rds_parameter_group_slow_query_disabled",
+                    severity="low",
+                    evidence_json=build_finding_evidence(
+                        title="RDS parameter group has slow query logging disabled",
+                        summary=(
+                            f"Parameter group {pg_name} does not have slow query logging enabled. "
+                            "Enabling it provides visibility into long-running queries for optimization."
+                        ),
+                        category="reliability",
+                        risk="low",
+                        confidence="high",
+                        recommendation_seed="rds_parameter_group_enable_slow_query_log",
+                        approval_required=False,
+                        execution_eligible=True,
+                        evidence={
+                            "parameter_group_name": pg_name,
+                            "slow_query_log_enabled": slow_query_enabled,
+                        },
+                    ),
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+        if general_log_enabled:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="rds_parameter_group_general_log_enabled",
+                    severity="medium",
+                    evidence_json=build_finding_evidence(
+                        title="RDS parameter group has general query logging enabled",
+                        summary=(
+                            f"Parameter group {pg_name} has general query logging enabled. "
+                            "This logs all queries and can impact database performance; typically use slow query log instead."
+                        ),
+                        category="reliability",
+                        risk="medium",
+                        confidence="high",
+                        recommendation_seed="rds_parameter_group_disable_general_log",
+                        approval_required=False,
+                        execution_eligible=True,
+                        evidence={
+                            "parameter_group_name": pg_name,
+                            "general_log_enabled": general_log_enabled,
+                        },
+                    ),
                     detected_at=detected_at,
                     sync_run_id=sync_run_id,
                 )

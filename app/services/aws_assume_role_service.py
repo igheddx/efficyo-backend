@@ -33,6 +33,7 @@ def assume_role(
     region: str = "us-east-1",
     session_name: str = "fptnext-session",
     duration_seconds: int = 900,
+    external_id: str | None = None,
 ) -> dict:
     """
     Assume an IAM role and return temporary credentials.
@@ -42,6 +43,7 @@ def assume_role(
         region: AWS region
         session_name: Role session name
         duration_seconds: Credential duration (default: 900 = 15 minutes)
+        external_id: Optional AWS STS ExternalId for cross-account trust policies
 
     Returns:
         Credentials dict with AccessKeyId, SecretAccessKey, SessionToken
@@ -60,11 +62,14 @@ def assume_role(
 
     try:
         sts_client = boto3.client("sts", region_name=region)
-        response = sts_client.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name,
-            DurationSeconds=duration_seconds,
-        )
+        assume_role_params = {
+            "RoleArn": role_arn,
+            "RoleSessionName": session_name,
+            "DurationSeconds": duration_seconds,
+        }
+        if external_id:
+            assume_role_params["ExternalId"] = external_id
+        response = sts_client.assume_role(**assume_role_params)
         return response["Credentials"]
     except ClientError as exc:
         error_code = exc.response["Error"]["Code"]

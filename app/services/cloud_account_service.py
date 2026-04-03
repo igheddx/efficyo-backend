@@ -85,6 +85,7 @@ def test_prospective_cloud_connection(
     account_id: str,
     role_arn: str,
     region_default: str,
+    external_id: str | None = None,
 ) -> aws_validation_service.AwsValidationResult:
     """
     STS assume-role + GetCallerIdentity using credentials not yet stored (onboarding test).
@@ -93,6 +94,7 @@ def test_prospective_cloud_connection(
     result = aws_validation_service.validate_cloud_account_role(
         role_arn=role_arn,
         region=region_default,
+        external_id=external_id,
     )
     if not result.success:
         return result
@@ -128,6 +130,7 @@ def create_cloud_account(db_session: Session, tenant_id: UUID, data: CloudAccoun
         last_validated_at=None,
         last_validation_error=None,
         role_arn=data.role_arn,
+        external_id=data.external_id,
         region_default=data.region_default,
     )
     db_session.add(cloud_account)
@@ -195,6 +198,7 @@ def validate_cloud_account(
     validation_result = aws_validation_service.validate_cloud_account_role(
         role_arn=cloud_account.role_arn,
         region=cloud_account.region_default,
+        external_id=cloud_account.external_id,
     )
     if validation_result.success:
         expected = normalize_aws_account_id(cloud_account.account_id)

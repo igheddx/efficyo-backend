@@ -1,5 +1,6 @@
 """
-Extended AWS discovery for CloudFront, ACM, API Gateway, EventBridge, SES, and VPC networking.
+Extended AWS discovery for CloudFront, ACM, API Gateway, EventBridge, SES, IoT,
+ELBv2 load balancers, and VPC networking.
 
 All resources normalize to ``resource_snapshot_service.create_snapshots`` rows:
 ``resource_id``, ``resource_type``, ``region``, ``configuration_json``, ``tags_json``.
@@ -27,6 +28,24 @@ _SKIPPABLE = frozenset({"UnauthorizedOperation", "AuthFailure", "AccessDenied", 
 
 # Cap very large accounts (Phase 1); raise in logs when hit.
 _MAX_SECURITY_GROUPS_PER_REGION = 2000
+
+
+def _resource_envelope(
+    *,
+    resource_id: str,
+    resource_type: str,
+    region: str,
+    configuration_json: dict[str, Any],
+    tags_json: dict[str, str],
+) -> dict[str, Any]:
+    """Normalized snapshot payload used across extended collectors."""
+    return {
+        "resource_id": resource_id,
+        "resource_type": resource_type,
+        "region": region,
+        "configuration_json": configuration_json,
+        "tags_json": tags_json,
+    }
 
 
 def _is_world_open(ip_ranges: list[dict] | None, ipv6_ranges: list[dict] | None) -> bool:
@@ -109,13 +128,13 @@ def _safe_list_tags_cloudfront(cf_client, arn: str) -> dict[str, str]:
         return {}
 
 
-def fetch_cloudfront_distributions(role_arn: str, home_region: str) -> list[dict]:
+def fetch_cloudfront_distributions(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
     """Global CloudFront distributions (API region us-east-1)."""
     region = "us-east-1"
     out: list[dict] = []
     try:
-        cf = _create_assumed_client("cloudfront", role_arn, region)
-        sts = _create_assumed_client("sts", role_arn, home_region)
+        cf = _create_assumed_client("cloudfront", role_arn, region, external_id=external_id)
+        sts = _create_assumed_client("sts", role_arn, home_region, external_id=external_id)
         account = str(sts.get_caller_identity().get("Account") or "")
         marker: str | None = None
         while True:
@@ -166,8 +185,8 @@ def fetch_cloudfront_distributions(role_arn: str, home_region: str) -> list[dict
     return out
 
 
-def _acm_one_region(role_arn: str, region: str) -> list[dict]:
-    acm = _create_assumed_client("acm", role_arn, region)
+def _acm_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    acm = _create_assumed_client("acm", role_arn, region, external_id=external_id)
     out: list[dict] = []
     paginator = acm.get_paginator("list_certificates")
     for page in paginator.paginate():
@@ -210,12 +229,18 @@ def _acm_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def fetch_acm_certificates(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _acm_one_region(role_arn, r), "ACM")
+def fetch_acm_certificates(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _acm_one_region(role_arn, r, external_id),
+        "ACM",
+        external_id=external_id,
+    )
 
 
-def _apigw_rest_one_region(role_arn: str, region: str) -> list[dict]:
-    client = _create_assumed_client("apigateway", role_arn, region)
+def _apigw_rest_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    client = _create_assumed_client("apigateway", role_arn, region, external_id=external_id)
     out: list[dict] = []
     try:
         items: list[dict] = []
@@ -314,12 +339,18 @@ def _apigw_rest_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def fetch_apigateway_rest_apis(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _apigw_rest_one_region(role_arn, r), "API Gateway REST")
+def fetch_apigateway_rest_apis(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _apigw_rest_one_region(role_arn, r, external_id),
+        "API Gateway REST",
+        external_id=external_id,
+    )
 
 
-def _apigw_http_one_region(role_arn: str, region: str) -> list[dict]:
-    client = _create_assumed_client("apigatewayv2", role_arn, region)
+def _apigw_http_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    client = _create_assumed_client("apigatewayv2", role_arn, region, external_id=external_id)
     out: list[dict] = []
     try:
         resp = client.get_apis()
@@ -384,12 +415,18 @@ def _apigw_http_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def fetch_apigateway_http_apis(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _apigw_http_one_region(role_arn, r), "API Gateway HTTP")
+def fetch_apigateway_http_apis(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _apigw_http_one_region(role_arn, r, external_id),
+        "API Gateway HTTP",
+        external_id=external_id,
+    )
 
 
-def _events_rules_one_region(role_arn: str, region: str) -> list[dict]:
-    client = _create_assumed_client("events", role_arn, region)
+def _events_rules_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    client = _create_assumed_client("events", role_arn, region, external_id=external_id)
     out: list[dict] = []
     paginator = client.get_paginator("list_rules")
     for page in paginator.paginate():
@@ -423,12 +460,18 @@ def _events_rules_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def fetch_eventbridge_rules(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _events_rules_one_region(role_arn, r), "EventBridge")
+def fetch_eventbridge_rules(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _events_rules_one_region(role_arn, r, external_id),
+        "EventBridge",
+        external_id=external_id,
+    )
 
 
-def _ses_identities_one_region(role_arn: str, region: str) -> list[dict]:
-    client = _create_assumed_client("sesv2", role_arn, region)
+def _ses_identities_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    client = _create_assumed_client("sesv2", role_arn, region, external_id=external_id)
     out: list[dict] = []
     paginator = client.get_paginator("list_email_identities")
     for page in paginator.paginate():
@@ -461,12 +504,354 @@ def _ses_identities_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def fetch_ses_email_identities(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _ses_identities_one_region(role_arn, r), "SES")
+def fetch_ses_email_identities(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _ses_identities_one_region(role_arn, r, external_id),
+        "SES",
+        external_id=external_id,
+    )
 
 
-def _ec2_vpcs_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2 = _create_assumed_client("ec2", role_arn, region)
+def _iot_things_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    """Collect AWS IoT Things for governance visibility."""
+    client = _create_assumed_client("iot", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    marker: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {"maxResults": 250}
+        if marker:
+            kwargs["nextToken"] = marker
+        try:
+            resp = client.list_things(**kwargs)
+        except (ClientError, BotoCoreError) as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if code in _SKIPPABLE:
+                return []
+            raise
+
+        for thing in resp.get("things", []) or []:
+            thing_name = str(thing.get("thingName") or "").strip()
+            if not thing_name:
+                continue
+
+            thing_arn = str(thing.get("thingArn") or "").strip()
+            thing_type_name = str(thing.get("thingTypeName") or "").strip()
+            attrs = thing.get("attributes") if isinstance(thing.get("attributes"), dict) else {}
+
+            tags: dict[str, str] = {}
+            if thing_arn:
+                try:
+                    tr = client.list_tags_for_resource(resourceArn=thing_arn)
+                    tags = _normalize_tags(tr.get("tags", []))
+                except (ClientError, BotoCoreError):
+                    # Tag listing often requires separate permissions; keep ingestion resilient.
+                    tags = {}
+
+            out.append(
+                {
+                    "resource_id": thing_name,
+                    "resource_type": "iot_thing",
+                    "region": region,
+                    "configuration_json": {
+                        "thing_arn": thing_arn,
+                        "thing_type_name": thing_type_name,
+                        "attributes": attrs,
+                        "version": thing.get("version"),
+                    },
+                    "tags_json": tags,
+                }
+            )
+
+        marker = resp.get("nextToken")
+        if not marker:
+            break
+
+    return out
+
+
+def fetch_iot_things(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _iot_things_one_region(role_arn, r, external_id),
+        "IoT",
+        external_id=external_id,
+    )
+
+
+def _elbv2_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    client = _create_assumed_client("elbv2", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = client.get_paginator("describe_load_balancers")
+    for page in paginator.paginate():
+        for lb in page.get("LoadBalancers", []) or []:
+            lb_arn = str(lb.get("LoadBalancerArn") or "").strip()
+            if not lb_arn:
+                continue
+            lb_name = str(lb.get("LoadBalancerName") or "").strip()
+
+            tags: dict[str, str] = {}
+            try:
+                tag_resp = client.describe_tags(ResourceArns=[lb_arn])
+                tag_rows = (tag_resp.get("TagDescriptions") or [{}])[0].get("Tags", [])
+                tags = _normalize_tags(tag_rows)
+            except (ClientError, BotoCoreError):
+                tags = {}
+
+            deletion_protection_enabled = False
+            try:
+                attrs_resp = client.describe_load_balancer_attributes(LoadBalancerArn=lb_arn)
+                attrs = attrs_resp.get("Attributes", []) or []
+                for a in attrs:
+                    if str(a.get("Key") or "") == "deletion_protection.enabled":
+                        deletion_protection_enabled = str(a.get("Value") or "").lower() == "true"
+                        break
+            except (ClientError, BotoCoreError):
+                deletion_protection_enabled = False
+
+            target_group_arns: list[str] = []
+            healthy_target_count = 0
+            try:
+                tg_paginator = client.get_paginator("describe_target_groups")
+                for tg_page in tg_paginator.paginate(LoadBalancerArn=lb_arn):
+                    for tg in tg_page.get("TargetGroups", []) or []:
+                        tg_arn = str(tg.get("TargetGroupArn") or "").strip()
+                        if not tg_arn:
+                            continue
+                        target_group_arns.append(tg_arn)
+                        try:
+                            th = client.describe_target_health(TargetGroupArn=tg_arn)
+                            for desc in th.get("TargetHealthDescriptions", []) or []:
+                                state = str((desc.get("TargetHealth") or {}).get("State") or "").lower()
+                                if state == "healthy":
+                                    healthy_target_count += 1
+                        except (ClientError, BotoCoreError):
+                            continue
+            except (ClientError, BotoCoreError):
+                target_group_arns = []
+
+            linked_resources = [
+                _linked_resource_ref(
+                    resource_type="target_group",
+                    resource_id=tg_arn,
+                    resource_name=tg_arn.rsplit(":", 1)[-1],
+                    relation="routes_to",
+                    confidence="direct_reference",
+                    source="elbv2.describe_target_groups",
+                )
+                for tg_arn in target_group_arns
+            ]
+
+            out.append(
+                _resource_envelope(
+                    resource_id=lb_arn,
+                    resource_type="load_balancer",
+                    region=region,
+                    configuration_json={
+                        "load_balancer_name": lb_name,
+                        "dns_name": lb.get("DNSName"),
+                        "scheme": lb.get("Scheme"),
+                        "type": lb.get("Type"),
+                        "state": (lb.get("State") or {}).get("Code"),
+                        "vpc_id": lb.get("VpcId"),
+                        "ip_address_type": lb.get("IpAddressType"),
+                        "availability_zone_count": len(lb.get("AvailabilityZones") or []),
+                        "deletion_protection_enabled": deletion_protection_enabled,
+                        "target_group_count": len(target_group_arns),
+                        "healthy_target_count": healthy_target_count,
+                        "linked_resources": linked_resources,
+                    },
+                    tags_json=tags,
+                )
+            )
+
+    return out
+
+
+def fetch_load_balancers(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _elbv2_one_region(role_arn, r, external_id),
+        "ELBv2",
+        external_id=external_id,
+    )
+
+
+def _target_groups_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    client = _create_assumed_client("elbv2", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    try:
+        paginator = client.get_paginator("describe_target_groups")
+        for page in paginator.paginate():
+            for tg in page.get("TargetGroups", []) or []:
+                tg_arn = str(tg.get("TargetGroupArn") or "").strip()
+                if not tg_arn:
+                    continue
+
+                tg_name = str(tg.get("TargetGroupName") or "").strip()
+                
+                # Get health status for this target group
+                healthy_count = 0
+                unhealthy_count = 0
+                total_count = 0
+                try:
+                    health_resp = client.describe_target_health(TargetGroupArn=tg_arn)
+                    for target_health in health_resp.get("TargetHealthDescriptions", []) or []:
+                        state = str((target_health.get("TargetHealth") or {}).get("State") or "").lower()
+                        total_count += 1
+                        if state == "healthy":
+                            healthy_count += 1
+                        elif state == "unhealthy":
+                            unhealthy_count += 1
+                except (ClientError, BotoCoreError):
+                    pass
+                
+                # Get target group attributes (deregistration delay, stickiness, etc)
+                attributes: dict[str, str] = {}
+                try:
+                    attrs_resp = client.describe_target_group_attributes(TargetGroupArn=tg_arn)
+                    for attr in attrs_resp.get("Attributes", []) or []:
+                        k = str(attr.get("Key") or "")
+                        v = str(attr.get("Value") or "")
+                        if k:
+                            attributes[k] = v
+                except (ClientError, BotoCoreError):
+                    pass
+                
+                # Parse deregistration delay
+                deregistration_delay_str = attributes.get("deregistration_delay.timeout_seconds", "30")
+                try:
+                    deregistration_delay = int(deregistration_delay_str)
+                except (ValueError, TypeError):
+                    deregistration_delay = 30
+                
+                # Parse stickiness
+                stickiness_enabled = attributes.get("stickiness.enabled", "false").lower() == "true"
+                stickiness_type = attributes.get("stickiness.type", "").lower()
+                
+                out.append(
+                    _resource_envelope(
+                        resource_id=tg_arn,
+                        resource_type="target_group",
+                        region=region,
+                        configuration_json={
+                            "target_group_name": tg_name,
+                            "protocol": tg.get("Protocol"),
+                            "port": tg.get("Port"),
+                            "vpc_id": tg.get("VpcId"),
+                            "target_type": tg.get("TargetType"),
+                            "healthy_count": healthy_count,
+                            "unhealthy_count": unhealthy_count,
+                            "total_targets": total_count,
+                            "health_check_enabled": tg.get("HealthCheckEnabled"),
+                            "health_check_protocol": tg.get("HealthCheckProtocol"),
+                            "health_check_path": tg.get("HealthCheckPath"),
+                            "health_check_interval_seconds": tg.get("HealthCheckIntervalSeconds"),
+                            "healthy_threshold_count": tg.get("HealthyThresholdCount"),
+                            "unhealthy_threshold_count": tg.get("UnhealthyThresholdCount"),
+                            "stickiness_enabled": stickiness_enabled,
+                            "stickiness_type": stickiness_type,
+                            "deregistration_delay_seconds": deregistration_delay,
+                        },
+                        tags_json=_normalize_tags(tg.get("Tags", [])),
+                    )
+                )
+    except (ClientError, BotoCoreError) as e:
+        if str(e.response.get("Error", {}).get("Code", "")) not in _SKIPPABLE:
+            logger.warning("target_groups collection failed in %s: %s", region, e)
+    
+    return out
+
+
+def fetch_target_groups(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _target_groups_one_region(role_arn, r, external_id),
+        "TargetGroups",
+        external_id=external_id,
+    )
+
+
+def _route_tables_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2 = _create_assumed_client("ec2", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = ec2.get_paginator("describe_route_tables")
+    for page in paginator.paginate():
+        for rt in page.get("RouteTables", []) or []:
+            rtid = rt.get("RouteTableId")
+            if not rtid:
+                continue
+
+            associations = rt.get("Associations", []) or []
+            routes = rt.get("Routes", []) or []
+            has_any_default_route = False
+            has_igw_default_route = False
+            has_nat_default_route = False
+
+            for route in routes:
+                dest = str(route.get("DestinationCidrBlock") or route.get("DestinationIpv6CidrBlock") or "")
+                if dest not in {"0.0.0.0/0", "::/0"}:
+                    continue
+                has_any_default_route = True
+                gateway_id = str(route.get("GatewayId") or "")
+                nat_gateway_id = str(route.get("NatGatewayId") or "")
+                if gateway_id.startswith("igw-"):
+                    has_igw_default_route = True
+                if nat_gateway_id.startswith("nat-"):
+                    has_nat_default_route = True
+
+            linked_resources: list[dict[str, str]] = []
+            for assoc in associations:
+                subnet_id = str(assoc.get("SubnetId") or "").strip()
+                if subnet_id:
+                    linked_resources.append(
+                        _linked_resource_ref(
+                            resource_type="subnet",
+                            resource_id=subnet_id,
+                            resource_name=subnet_id,
+                            relation="associated_subnet",
+                            confidence="direct_reference",
+                            source="ec2.describe_route_tables",
+                        )
+                    )
+
+            out.append(
+                _resource_envelope(
+                    resource_id=rtid,
+                    resource_type="route_table",
+                    region=region,
+                    configuration_json={
+                        "vpc_id": rt.get("VpcId"),
+                        "association_count": len(associations),
+                        "route_count": len(routes),
+                        "has_any_default_route": has_any_default_route,
+                        "has_igw_default_route": has_igw_default_route,
+                        "has_nat_default_route": has_nat_default_route,
+                        "linked_resources": linked_resources,
+                    },
+                    tags_json=_normalize_tags(rt.get("Tags", [])),
+                )
+            )
+
+    return out
+
+
+def fetch_route_tables(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _route_tables_one_region(role_arn, r, external_id),
+        "RouteTables",
+        external_id=external_id,
+    )
+
+
+def _ec2_vpcs_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2 = _create_assumed_client("ec2", role_arn, region, external_id=external_id)
     out: list[dict] = []
     paginator = ec2.get_paginator("describe_vpcs")
     for page in paginator.paginate():
@@ -489,8 +874,8 @@ def _ec2_vpcs_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def _ec2_subnets_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2 = _create_assumed_client("ec2", role_arn, region)
+def _ec2_subnets_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2 = _create_assumed_client("ec2", role_arn, region, external_id=external_id)
     out: list[dict] = []
     paginator = ec2.get_paginator("describe_subnets")
     for page in paginator.paginate():
@@ -514,8 +899,8 @@ def _ec2_subnets_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def _nat_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2 = _create_assumed_client("ec2", role_arn, region)
+def _nat_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2 = _create_assumed_client("ec2", role_arn, region, external_id=external_id)
     out: list[dict] = []
     paginator = ec2.get_paginator("describe_nat_gateways")
     for page in paginator.paginate():
@@ -539,8 +924,8 @@ def _nat_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def _igw_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2 = _create_assumed_client("ec2", role_arn, region)
+def _igw_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2 = _create_assumed_client("ec2", role_arn, region, external_id=external_id)
     out: list[dict] = []
     paginator = ec2.get_paginator("describe_internet_gateways")
     for page in paginator.paginate():
@@ -561,8 +946,8 @@ def _igw_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def _sg_one_region(role_arn: str, region: str) -> list[dict]:
-    ec2 = _create_assumed_client("ec2", role_arn, region)
+def _sg_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec2 = _create_assumed_client("ec2", role_arn, region, external_id=external_id)
     out: list[dict] = []
     n = 0
     paginator = ec2.get_paginator("describe_security_groups")
@@ -601,40 +986,161 @@ def _sg_one_region(role_arn: str, region: str) -> list[dict]:
     return out
 
 
-def fetch_vpcs(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _ec2_vpcs_one_region(role_arn, r), "VPC")
+def fetch_vpcs(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _ec2_vpcs_one_region(role_arn, r, external_id),
+        "VPC",
+        external_id=external_id,
+    )
 
 
-def fetch_subnets(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _ec2_subnets_one_region(role_arn, r), "subnet")
+def fetch_subnets(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _ec2_subnets_one_region(role_arn, r, external_id),
+        "subnet",
+        external_id=external_id,
+    )
 
 
-def fetch_nat_gateways(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _nat_one_region(role_arn, r), "NAT GW")
+def fetch_nat_gateways(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _nat_one_region(role_arn, r, external_id),
+        "NAT GW",
+        external_id=external_id,
+    )
 
 
-def fetch_internet_gateways(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _igw_one_region(role_arn, r), "IGW")
+def fetch_internet_gateways(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _igw_one_region(role_arn, r, external_id),
+        "IGW",
+        external_id=external_id,
+    )
 
 
-def fetch_security_groups(role_arn: str, home_region: str) -> list[dict]:
-    return _gather_per_region(role_arn, home_region, lambda r: _sg_one_region(role_arn, r), "SG")
+def fetch_security_groups(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _sg_one_region(role_arn, r, external_id),
+        "SG",
+        external_id=external_id,
+    )
 
 
-def fetch_all_extended(role_arn: str, home_region: str) -> dict[str, list[dict]]:
+def _rds_parameter_groups_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    rds = _create_assumed_client("rds", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    try:
+        paginator = rds.get_paginator("describe_db_parameter_groups")
+        for page in paginator.paginate():
+            for pg in page.get("DBParameterGroups", []) or []:
+                pg_name = str(pg.get("DBParameterGroupName") or "").strip()
+                pg_arn = str(pg.get("DBParameterGroupArn") or "").strip()
+                
+                if not pg_arn:
+                    continue
+                
+                # Get tags for this parameter group
+                tags: dict[str, str] = {}
+                try:
+                    tags_resp = rds.list_tags_for_resource(ResourceName=pg_arn)
+                    for tag_list in tags_resp.get("TagList", []) or []:
+                        k = str(tag_list.get("Key") or "").strip()
+                        v = str(tag_list.get("Value") or "").strip()
+                        if k:
+                            tags[k] = v
+                except (ClientError, BotoCoreError):
+                    tags = {}
+                
+                # Get parameter details (slow query logging, query insights, etc)
+                slow_query_log_enabled = False
+                general_log_enabled = False
+                log_bin_trust_function_creators = False
+                
+                try:
+                    params_resp = rds.describe_db_parameters(
+                        DBParameterGroupName=pg_name,
+                        Filters=[
+                            {"Name": "source", "Values": ["user"]},
+                        ],
+                        MaxRecords=100,
+                    )
+                    user_params = params_resp.get("Parameters", []) or []
+                    
+                    for param in user_params:
+                        pname = str(param.get("ParameterName") or "").lower()
+                        if pname == "slow_query_log":
+                            slow_query_log_enabled = str(param.get("ParameterValue") or "").lower() in ("1", "true")
+                        elif pname == "general_log":
+                            general_log_enabled = str(param.get("ParameterValue") or "").lower() in ("1", "true")
+                        elif pname == "log_bin_trust_function_creators":
+                            log_bin_trust_function_creators = str(param.get("ParameterValue") or "").lower() in ("1", "true")
+                except (ClientError, BotoCoreError):
+                    user_params = []
+                
+                out.append(
+                    _resource_envelope(
+                        resource_id=pg_arn,
+                        resource_type="rds_parameter_group",
+                        region=region,
+                        configuration_json={
+                            "parameter_group_name": pg_name,
+                            "db_parameter_group_family": pg.get("DBParameterGroupFamily"),
+                            "description": pg.get("Description"),
+                            "parameter_group_status": pg.get("DBParameterGroupStatus"),
+                            "slow_query_log_enabled": slow_query_log_enabled,
+                            "general_log_enabled": general_log_enabled,
+                            "log_bin_trust_function_creators": log_bin_trust_function_creators,
+                            "custom_parameter_count": len(user_params),
+                        },
+                        tags_json=tags,
+                    )
+                )
+    except (ClientError, BotoCoreError) as e:
+        if str(e.response.get("Error", {}).get("Code", "")) not in _SKIPPABLE:
+            logger.warning("rds_parameter_groups collection failed in %s: %s", region, e)
+    
+    return out
+
+
+def fetch_rds_parameter_groups(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _rds_parameter_groups_one_region(role_arn, r, external_id),
+        "RDSParameterGroups",
+        external_id=external_id,
+    )
+
+
+def fetch_all_extended(role_arn: str, home_region: str, external_id: str | None = None) -> dict[str, list[dict]]:
     """Return keyed batches for observability (each value is a list of snapshot dicts)."""
     batches = {
-        "cloudfront_distribution": fetch_cloudfront_distributions(role_arn, home_region),
-        "acm_certificate": fetch_acm_certificates(role_arn, home_region),
-        "apigateway_rest_api": fetch_apigateway_rest_apis(role_arn, home_region),
-        "apigateway_http_api": fetch_apigateway_http_apis(role_arn, home_region),
-        "eventbridge_rule": fetch_eventbridge_rules(role_arn, home_region),
-        "ses_email_identity": fetch_ses_email_identities(role_arn, home_region),
-        "vpc": fetch_vpcs(role_arn, home_region),
-        "subnet": fetch_subnets(role_arn, home_region),
-        "nat_gateway": fetch_nat_gateways(role_arn, home_region),
-        "internet_gateway": fetch_internet_gateways(role_arn, home_region),
-        "security_group": fetch_security_groups(role_arn, home_region),
+        "cloudfront_distribution": fetch_cloudfront_distributions(role_arn, home_region, external_id),
+        "acm_certificate": fetch_acm_certificates(role_arn, home_region, external_id),
+        "apigateway_rest_api": fetch_apigateway_rest_apis(role_arn, home_region, external_id),
+        "apigateway_http_api": fetch_apigateway_http_apis(role_arn, home_region, external_id),
+        "eventbridge_rule": fetch_eventbridge_rules(role_arn, home_region, external_id),
+        "ses_email_identity": fetch_ses_email_identities(role_arn, home_region, external_id),
+        "iot_thing": fetch_iot_things(role_arn, home_region, external_id),
+        "load_balancer": fetch_load_balancers(role_arn, home_region, external_id),
+        "target_group": fetch_target_groups(role_arn, home_region, external_id),
+        "route_table": fetch_route_tables(role_arn, home_region, external_id),
+        "vpc": fetch_vpcs(role_arn, home_region, external_id),
+        "subnet": fetch_subnets(role_arn, home_region, external_id),
+        "nat_gateway": fetch_nat_gateways(role_arn, home_region, external_id),
+        "internet_gateway": fetch_internet_gateways(role_arn, home_region, external_id),
+        "security_group": fetch_security_groups(role_arn, home_region, external_id),
+        "rds_parameter_group": fetch_rds_parameter_groups(role_arn, home_region, external_id),
     }
     _link_cloudfront_to_acm(batches)
     return batches

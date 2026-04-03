@@ -49,6 +49,7 @@ def _s3_client_for_cloud(cloud: CloudAccount):
         role_arn=cloud.role_arn,
         region=cloud.region_default or "us-east-1",
         session_name="fptnext-safe-execution",
+        external_id=cloud.external_id,
     )
     return boto3.client(
         "s3",

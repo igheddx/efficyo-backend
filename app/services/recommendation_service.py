@@ -30,6 +30,7 @@ from app.services.recommendation_credibility import (
 )
 from app.services import detection_service, recommendation_intelligence_service, recommendation_outcome_service
 from app.services.cloud_account_service import get_cloud_account_or_raise as _get_cloud_account_or_raise
+from app.services.resource_capability_registry import TAG_GOVERNANCE_FINDING_TO_RECOMMENDATION
 
 
 logger = logging.getLogger(__name__)
@@ -139,11 +140,14 @@ def guided_actions_for_type(recommendation_type: str) -> tuple[list[str], str, s
         "apigateway_http_add_required_tags",
         "eventbridge_add_required_tags",
         "ses_add_required_tags",
+        "iot_add_required_tags",
         "vpc_add_required_tags",
         "subnet_add_required_tags",
         "nat_gateway_add_required_tags",
         "internet_gateway_add_required_tags",
         "security_group_add_required_tags",
+        "load_balancer_add_required_tags",
+        "route_table_add_required_tags",
     }:
         return (
             [
@@ -243,6 +247,50 @@ def guided_actions_for_type(recommendation_type: str) -> tuple[list[str], str, s
             "easy",
         )
 
+    if rtype == "load_balancer_enable_deletion_protection":
+        return (
+            [
+                "Open EC2 > Load Balancers and select the impacted load balancer",
+                "Enable deletion protection in load balancer attributes",
+                "Apply and verify the attribute is persisted",
+            ],
+            "5-10 minutes",
+            "easy",
+        )
+
+    if rtype == "load_balancer_review_target_health":
+        return (
+            [
+                "Open associated target groups and inspect target health reasons",
+                "Restore service endpoints, health check paths, or security-group rules",
+                "Validate healthy targets before closing the incident",
+            ],
+            "15-30 minutes",
+            "medium",
+        )
+
+    if rtype == "route_table_cleanup_unused":
+        return (
+            [
+                "Review whether the route table is intentionally reserved",
+                "Confirm it has no active subnet associations",
+                "Delete stale route tables or document ownership if retained",
+            ],
+            "10-20 minutes",
+            "easy",
+        )
+
+    if rtype == "route_table_review_public_egress":
+        return (
+            [
+                "Identify subnets associated with this route table",
+                "Validate whether direct internet egress is intended",
+                "For private workloads, route default traffic via NAT or remove the public default route",
+            ],
+            "15-30 minutes",
+            "medium",
+        )
+
     if rtype == "lambda_update_runtime":
         return (
             [
@@ -329,6 +377,65 @@ def guided_actions_for_type(recommendation_type: str) -> tuple[list[str], str, s
             ],
             "20-40 minutes",
             "medium",
+        )
+
+    if rtype == "target_group_review_target_health":
+        return (
+            [
+                "Open the target group and review target health descriptions",
+                "Identify why targets are unhealthy (failed health checks, registration in progress)",
+                "Restore endpoints, fix health check paths, or adjust security group rules",
+                "Verify all targets reach healthy state before closing",
+            ],
+            "20-40 minutes",
+            "medium",
+        )
+
+    if rtype == "target_group_enable_stickiness":
+        return (
+            [
+                "Open the target group attributes in EC2 console",
+                "Enable stickiness and choose duration (1 hour recommended)",
+                "Test application behavior to confirm session persistence",
+            ],
+            "5-15 minutes",
+            "easy",
+        )
+
+    if rtype == "target_group_optimize_deregistration_delay":
+        return (
+            [
+                "Open the target group attributes in EC2 console",
+                "Reduce deregistration delay to 30-60 seconds if workload allows",
+                "Test graceful shutdown behavior before applying in production",
+            ],
+            "5-15 minutes",
+            "easy",
+        )
+
+    if rtype == "rds_parameter_group_enable_slow_query_log":
+        return (
+            [
+                "Open RDS parameter group in AWS console",
+                "Edit the parameter group and set slow_query_log = 1",
+                "Set long_query_time to desired threshold (e.g., 2 seconds)",
+                "Apply changes to databases using this parameter group",
+                "Monitor MySQL slow query log in CloudWatch Logs",
+            ],
+            "15-30 minutes",
+            "easy",
+        )
+
+    if rtype == "rds_parameter_group_disable_general_log":
+        return (
+            [
+                "Open RDS parameter group in AWS console",
+                "Edit the parameter group and set general_log = 0",
+                "Apply changes to databases using this parameter group",
+                "Verify query performance improves after the change",
+            ],
+            "10-20 minutes",
+            "easy",
         )
 
     return (
@@ -486,6 +593,14 @@ def _recommendation_category_for_type(recommendation_type: str) -> str:
         "security_group_restrict_ingress",
         "eventbridge_add_targets_or_cleanup",
         "eventbridge_review_disabled_rule",
+        "load_balancer_enable_deletion_protection",
+        "load_balancer_review_target_health",
+        "route_table_review_public_egress",
+        "target_group_review_target_health",
+        "target_group_enable_stickiness",
+        "target_group_optimize_deregistration_delay",
+        "rds_parameter_group_enable_slow_query_log",
+        "rds_parameter_group_disable_general_log",
     }:
         return "security"
     return "governance"
@@ -493,18 +608,7 @@ def _recommendation_category_for_type(recommendation_type: str) -> str:
 
 # finding_type -> (recommendation_type, human noun for copy)
 _GOVERNANCE_TAG_FINDING_TO_RECOMMENDATION: dict[str, tuple[str, str]] = {
-    "ec2_missing_required_tags": ("ec2_add_required_tags", "EC2 instance"),
-    "cloudfront_distribution_missing_required_tags": ("cloudfront_add_required_tags", "CloudFront distribution"),
-    "acm_certificate_missing_required_tags": ("acm_add_required_tags", "ACM certificate"),
-    "apigateway_rest_api_missing_required_tags": ("apigateway_add_required_tags", "API Gateway REST API"),
-    "apigateway_http_api_missing_required_tags": ("apigateway_http_add_required_tags", "API Gateway HTTP API"),
-    "eventbridge_rule_missing_required_tags": ("eventbridge_add_required_tags", "EventBridge rule"),
-    "ses_email_identity_missing_required_tags": ("ses_add_required_tags", "SES identity"),
-    "vpc_missing_required_tags": ("vpc_add_required_tags", "VPC"),
-    "subnet_missing_required_tags": ("subnet_add_required_tags", "subnet"),
-    "nat_gateway_missing_required_tags": ("nat_gateway_add_required_tags", "NAT gateway"),
-    "internet_gateway_missing_required_tags": ("internet_gateway_add_required_tags", "internet gateway"),
-    "security_group_missing_required_tags": ("security_group_add_required_tags", "security group"),
+    **TAG_GOVERNANCE_FINDING_TO_RECOMMENDATION,
 }
 
 
@@ -743,6 +847,110 @@ def _build_recommendation_for_finding(
             risk_level="low",
             confidence_score="high",
             recommended_action="Enable the rule if active event automation is expected; otherwise document and keep disabled.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "load_balancer_deletion_protection_disabled":
+        rtype = "load_balancer_enable_deletion_protection"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Enable deletion protection for load balancer",
+            explanation=(
+                "Deletion protection is disabled for this load balancer. Enabling it helps prevent "
+                "accidental deletion that can cause availability incidents."
+            ),
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Enable deletion protection in load balancer attributes.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "load_balancer_no_healthy_targets":
+        rtype = "load_balancer_review_target_health"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review unhealthy load balancer target groups",
+            explanation=(
+                "This load balancer currently has no healthy targets. Review target-group health, "
+                "backend readiness, and health-check configuration to restore traffic reliability."
+            ),
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Fix target health and validate at least one healthy backend per target group.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "route_table_unassociated_review":
+        rtype = "route_table_cleanup_unused"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review or clean up unassociated route table",
+            explanation=(
+                "This route table has no subnet associations and may be stale configuration. "
+                "Review ownership and remove if unused."
+            ),
+            risk_level="low",
+            confidence_score="high",
+            recommended_action="Delete unused route table or document intended ownership and purpose.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "route_table_public_default_route_review":
+        rtype = "route_table_review_public_egress"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review route table public default egress",
+            explanation=(
+                "This route table sends default traffic directly to an internet gateway. "
+                "Verify this is intended for associated subnets and private workload boundaries."
+            ),
+            risk_level="medium",
+            confidence_score="medium",
+            recommended_action="Validate subnet intent and route default traffic through NAT where appropriate.",
             estimated_savings=estimated_savings,
             savings_basis=sb,
             confidence_reason=cr,
@@ -1227,6 +1435,136 @@ def _build_recommendation_for_finding(
             created_at=created_at,
         )
 
+    if finding.finding_type == "target_group_no_healthy_targets":
+        rtype = "target_group_review_target_health"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Review unhealthy target group targets",
+            explanation=(
+                "This target group has registered targets but none are currently healthy. "
+                "Update target configuration, health check settings, or backend readiness to restore traffic."
+            ),
+            risk_level="high",
+            confidence_score="high",
+            recommended_action="Inspect target health reasons and fix service endpoints or security group rules.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "target_group_stickiness_disabled":
+        rtype = "target_group_enable_stickiness"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Enable session stickiness on target group",
+            explanation=(
+                "This target group does not have session stickiness enabled. "
+                "Enable stickiness if your application maintains stateful connections or user sessions."
+            ),
+            risk_level="low",
+            confidence_score="medium",
+            recommended_action="Enable stickiness (duration typically 1 hour) if targets maintain session state.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "target_group_slow_deregistration":
+        rtype = "target_group_optimize_deregistration_delay"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Optimize target group deregistration delay",
+            explanation=(
+                "This target group has a long deregistration delay (>60 seconds). "
+                "Reducing this can minimize traffic loss during deployments and scale-down events."
+            ),
+            risk_level="low",
+            confidence_score="high",
+            recommended_action="Reduce deregistration delay to 30-60 seconds after testing graceful shutdown behavior.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "rds_parameter_group_slow_query_disabled":
+        rtype = "rds_parameter_group_enable_slow_query_log"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Enable slow query logging on RDS parameter group",
+            explanation=(
+                "This RDS parameter group does not have slow query logging enabled. "
+                "Enabling slow_query_log provides visibility into query performance issues and optimization opportunities."
+            ),
+            risk_level="low",
+            confidence_score="high",
+            recommended_action="Enable slow_query_log parameter and set long_query_time threshold appropriately.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
+    if finding.finding_type == "rds_parameter_group_general_log_enabled":
+        rtype = "rds_parameter_group_disable_general_log"
+        rcat = _recommendation_category_for_type(rtype)
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary="Disable general query logging on RDS parameter group",
+            explanation=(
+                "This RDS parameter group has general query logging enabled. "
+                "General logging logs all queries and can significantly impact database performance; use slow query log instead."
+            ),
+            risk_level="medium",
+            confidence_score="high",
+            recommended_action="Disable general_log parameter to improve database performance.",
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
+
     return None
 
 
@@ -1242,26 +1580,19 @@ _RECOMMENDATION_SOURCE_FINDING_TYPES = (
     "s3_lifecycle_policy_missing",
     "nat_gateway_cost_review_candidate",
     "waf_cost_review_candidate",
-    "ec2_missing_required_tags",
+    *_GOVERNANCE_TAG_FINDING_TO_RECOMMENDATION.keys(),
     "ec2_stopped_instance",
-    "cloudfront_distribution_missing_required_tags",
-    "acm_certificate_missing_required_tags",
     "acm_certificate_expiring_soon",
-    "apigateway_rest_api_missing_required_tags",
-    "apigateway_http_api_missing_required_tags",
-    "eventbridge_rule_missing_required_tags",
-    "ses_email_identity_missing_required_tags",
-    "vpc_missing_required_tags",
-    "subnet_missing_required_tags",
-    "nat_gateway_missing_required_tags",
-    "internet_gateway_missing_required_tags",
-    "security_group_missing_required_tags",
     "cloudfront_insecure_viewer_protocol_policy",
     "cloudfront_missing_https_redirect",
     "cloudfront_disabled_distribution_review",
     "apigateway_public_exposure_review",
     "eventbridge_rule_without_targets",
     "eventbridge_rule_disabled_review",
+    "load_balancer_deletion_protection_disabled",
+    "load_balancer_no_healthy_targets",
+    "route_table_unassociated_review",
+    "route_table_public_default_route_review",
     "acm_certificate_pending_validation",
     "acm_certificate_validation_issue",
     "ses_identity_unverified",
@@ -1270,6 +1601,11 @@ _RECOMMENDATION_SOURCE_FINDING_TYPES = (
     "security_group_overly_permissive",
     "lambda_outdated_runtime",
     "lambda_review_timeout_configuration",
+    "target_group_no_healthy_targets",
+    "target_group_stickiness_disabled",
+    "target_group_slow_deregistration",
+    "rds_parameter_group_slow_query_disabled",
+    "rds_parameter_group_general_log_enabled",
 )
 
 

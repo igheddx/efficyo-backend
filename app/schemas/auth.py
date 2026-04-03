@@ -9,3 +9,10 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     email: str
     display_name: str
+
+
+class TemporaryPasswordCompleteRequest(BaseModel):
+    login: str = Field(..., min_length=1, max_length=320, description="Email address")
+    temporary_password: str = Field(..., min_length=1, max_length=512)
+    new_password: str = Field(..., min_length=1, max_length=512)
+    confirm_password: str = Field(..., min_length=1, max_length=512)

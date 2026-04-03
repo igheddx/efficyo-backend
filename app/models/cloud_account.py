@@ -22,6 +22,7 @@ class CloudAccount(Base):
     last_validated_at = Column(DateTime(timezone=True), nullable=True)
     last_validation_error = Column(Text, nullable=True)
     role_arn = Column(String(512), nullable=False)
+    external_id = Column(String(1224), nullable=True)
     region_default = Column(String(64), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)

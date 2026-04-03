@@ -90,7 +90,10 @@ class CostExplorerClient:
             policy=policy,
             api_name="ce.get_cost_and_usage.summary",
             payload={"role_arn": cloud_account.role_arn},
-            fn=lambda: cost_explorer_service.fetch_cost_summary(role_arn=cloud_account.role_arn),
+            fn=lambda: cost_explorer_service.fetch_cost_summary(
+                role_arn=cloud_account.role_arn,
+                external_id=cloud_account.external_id,
+            ),
         )
 
     def fetch_daily_by_service(
@@ -111,6 +114,7 @@ class CostExplorerClient:
             fn=lambda: cost_explorer_service.fetch_daily_unblended_cost_by_service(
                 role_arn=cloud_account.role_arn,
                 days=days,
+                external_id=cloud_account.external_id,
             ),
         )
 
@@ -121,6 +125,9 @@ class CostExplorerClient:
             policy=policy,
             api_name="ce.get_cost_and_usage.ec2_other",
             payload={"role_arn": cloud_account.role_arn},
-            fn=lambda: cost_explorer_service.fetch_ec2_other_breakdown(role_arn=cloud_account.role_arn),
+            fn=lambda: cost_explorer_service.fetch_ec2_other_breakdown(
+                role_arn=cloud_account.role_arn,
+                external_id=cloud_account.external_id,
+            ),
         )
 
