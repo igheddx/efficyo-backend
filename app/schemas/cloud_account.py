@@ -19,6 +19,7 @@ class CloudAccountCreate(BaseModel):
     account_id: str = Field(..., min_length=1, max_length=32)
     name: str = Field(..., min_length=1, max_length=255)
     role_arn: str = Field(..., min_length=1, max_length=512)
+    execution_role_arn: str | None = Field(default=None, max_length=512)
     external_id: str | None = Field(default=None, max_length=1224)
     region_default: str = Field(..., min_length=1, max_length=64)
     trigger_initial_sync: bool = False
@@ -109,6 +110,7 @@ class CloudAccountRead(BaseModel):
     last_validated_at: Optional[datetime] = None
     last_validation_error: Optional[str] = None
     role_arn: str
+    execution_role_arn: Optional[str] = None
     region_default: str
     created_at: datetime
     updated_at: datetime

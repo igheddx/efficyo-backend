@@ -130,6 +130,7 @@ def create_cloud_account(db_session: Session, tenant_id: UUID, data: CloudAccoun
         last_validated_at=None,
         last_validation_error=None,
         role_arn=data.role_arn,
+        execution_role_arn=data.execution_role_arn,
         external_id=data.external_id,
         region_default=data.region_default,
     )
