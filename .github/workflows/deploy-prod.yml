@@ -1,0 +1,50 @@
+name: Deploy PROD Backend
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "app/**"
+      - "alembic/**"
+      - "alembic.ini"
+      - "requirements.txt"
+      - "Dockerfile*"
+      - "scripts/**"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Deploy to PROD server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ubuntu
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            echo "==> Pulling latest backend code"
+            cd /opt/meezi/efficyo-backend
+            git fetch https://github.com/igheddx/efficyo-backend.git main
+            git reset --hard FETCH_HEAD
+
+            echo "==> Building new image"
+            cd /opt/meezi
+            sudo docker compose build api
+
+            echo "==> Running database migrations"
+            sudo docker compose run --rm \
+              -e PYTHONPATH=/app \
+              --no-deps \
+              --entrypoint "" \
+              api \
+              sh -c "cd /app && alembic upgrade head"
+
+            echo "==> Restarting api and worker"
+            sudo docker compose up -d api worker
+
+            echo "==> Deploy complete"
