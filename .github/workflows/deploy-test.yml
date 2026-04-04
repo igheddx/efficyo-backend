@@ -3,7 +3,7 @@ name: Deploy TEST Backend
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches: ["develop"]
     paths:
       - "app/**"
       - "alembic/**"
@@ -28,7 +28,7 @@ jobs:
 
             echo "==> Pulling latest backend code"
             cd /opt/meezi/efficyo-backend
-            git fetch https://github.com/igheddx/efficyo-backend.git main
+            git fetch https://github.com/igheddx/efficyo-backend.git develop
             git reset --hard FETCH_HEAD
 
             echo "==> Building new image"
