@@ -1,4 +1,4 @@
-"""Savings credibility copy: basis, confidence reason, and why-it-matters (rank-aware at read time)."""
+"""Recommendation credibility copy and resource-aware prioritization helpers."""
 
 from __future__ import annotations
 
@@ -8,6 +8,14 @@ from uuid import UUID
 
 from app.models.recommendation import Recommendation
 from app.core.cost_window import ACCOUNT_ROLLING_WINDOW_DAYS, DEFAULT_COST_METRIC, account_cost_window_label
+from app.services.recommendation_scoring import (
+    computed_priority_score,
+    priority_bucket_for as priority_bucket_for_recommendation,
+    ranking_reason_for as ranking_reason_from_profile,
+    recommendation_sort_key,
+    resolved_scoring_profile,
+    score_value,
+)
 
 
 def savings_basis_for(recommendation_type: str, recommendation_category: str) -> str:
@@ -102,73 +110,49 @@ def _normalized_savings(estimated_savings: Optional[Decimal | float], max_saving
 
 def decision_factors_for(rec: Recommendation, max_savings: float) -> dict[str, float]:
     normalized_savings = _normalized_savings(rec.estimated_savings, max_savings)
+    profile = resolved_scoring_profile(rec)
     risk_factor = _risk_factor(rec.risk_level)
-    confidence_factor = _confidence_factor(rec.confidence_score)
-    urgency_factor = _urgency_factor(rec.recommendation_category)
-    score = (
-        (0.4 * normalized_savings)
-        + (0.2 * risk_factor)
-        + (0.2 * confidence_factor)
-        + (0.2 * urgency_factor)
-    )
+    confidence_factor = score_value(profile.confidence_score, dimension="confidence") / 3
+    urgency_factor = score_value(profile.actionability_type, dimension="actionability") / 3
+    impact_factor = score_value(profile.impact_score, dimension="impact") / 3
+    effort_factor = score_value(profile.effort_score, dimension="effort") / 3
+    score = computed_priority_score(rec, max_savings)
     return {
         "normalized_savings": round(normalized_savings, 4),
         "risk_factor": round(risk_factor, 4),
         "confidence_factor": round(confidence_factor, 4),
         "urgency_factor": round(urgency_factor, 4),
+        "impact_factor": round(impact_factor, 4),
+        "effort_factor": round(effort_factor, 4),
         "score": round(score, 4),
     }
 
 
 def computed_impact_score(rec: Recommendation, max_savings: float = 0.0) -> float:
-    return decision_factors_for(rec, max_savings)["score"]
+    return computed_priority_score(rec, max_savings)
 
 
-def priority_bucket_for(score: float) -> str:
-    if score >= 0.75:
+def priority_bucket_for(rec_or_score) -> str:
+    if isinstance(rec_or_score, Recommendation):
+        return priority_bucket_for_recommendation(rec_or_score)
+    score = float(rec_or_score or 0)
+    if score >= 0.72:
         return "high"
-    if score >= 0.5:
+    if score >= 0.48:
         return "medium"
     return "low"
 
 
 def ranking_reason_for(rec: Recommendation, factors: dict[str, float]) -> str:
-    parts: list[str] = []
-    ns = factors.get("normalized_savings", 0.0)
-    if ns >= 0.7:
-        parts.append("high savings impact")
-    elif ns >= 0.3:
-        parts.append("moderate savings impact")
-
-    rf = factors.get("risk_factor", 0.0)
-    if rf >= 1.0:
-        parts.append("high risk urgency")
-    elif rf >= 0.6:
-        parts.append("meaningful risk reduction")
-
-    cf = factors.get("confidence_factor", 0.0)
-    if cf >= 1.0:
-        parts.append("high confidence")
-    elif cf >= 0.7:
-        parts.append("moderate confidence")
-
-    uf = factors.get("urgency_factor", 0.0)
-    cat = (rec.recommendation_category or "").lower()
-    if uf >= 1.0 and cat == "security":
-        parts.append("security-priority action")
-    elif uf >= 0.7 and cat == "cost":
-        parts.append("cost-priority action")
-
-    if not parts:
-        return "Balanced impact across urgency, confidence, and risk."
-    return ", ".join(parts[:3]).capitalize() + "."
+    del factors
+    return ranking_reason_from_profile(rec)
 
 
 def rank_by_computed_score(recommendations: list[Recommendation]) -> dict[UUID, int]:
     """1-based rank by computed_impact_score descending."""
     savings_values = [float(r.estimated_savings) for r in recommendations if r.estimated_savings is not None]
     max_savings = max(savings_values) if savings_values else 0.0
-    sorted_recs = sorted(recommendations, key=lambda r: computed_impact_score(r, max_savings), reverse=True)
+    sorted_recs = sorted(recommendations, key=lambda r: recommendation_sort_key(r, max_savings))
     return {rec.id: i + 1 for i, rec in enumerate(sorted_recs)}
 
 
@@ -181,4 +165,4 @@ def effective_savings_basis(rec: Recommendation) -> str:
 def effective_confidence_reason(rec: Recommendation) -> str:
     if rec.confidence_reason:
         return rec.confidence_reason
-    return confidence_reason_for(rec.estimated_savings)
+    return resolved_scoring_profile(rec).confidence_reasoning

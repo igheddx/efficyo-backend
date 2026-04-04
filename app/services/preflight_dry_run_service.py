@@ -69,6 +69,45 @@ def _merge_tags_for_tags_recommendation(
     return merged
 
 
+def _preflight_aws_client_error_result(rec: Recommendation, exc: ClientError) -> dict[str, Any]:
+    code = str(exc.response.get("Error", {}).get("Code", "") or "")
+    msg = str(exc.response.get("Error", {}).get("Message", "") or "")
+    checks = [
+        {
+            "name": "aws_access",
+            "status": "fail",
+            "message": (
+                f"Could not access AWS for preflight ({code or 'ClientError'}): {msg}. "
+                "Check the cloud account role trust policy and sts:AssumeRole permissions."
+            ),
+        }
+    ]
+    return {
+        "recommendation_id": rec.id,
+        "status": "blocked",
+        "risk_level": rec.risk_level,
+        "safe_to_apply": False,
+        "checks": checks,
+    }
+
+
+def _preflight_boto_error_result(rec: Recommendation, exc: BotoCoreError) -> dict[str, Any]:
+    checks = [
+        {
+            "name": "aws_access",
+            "status": "fail",
+            "message": f"Could not access AWS for preflight: {exc}",
+        }
+    ]
+    return {
+        "recommendation_id": rec.id,
+        "status": "blocked",
+        "risk_level": rec.risk_level,
+        "safe_to_apply": False,
+        "checks": checks,
+    }
+
+
 def run_preflight(
     db_session: Session,
     tenant_id: UUID,
@@ -96,7 +135,12 @@ def run_preflight(
         }
 
     cloud = _get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
-    s3 = _s3_client_for_cloud(cloud)
+    try:
+        s3 = _s3_client_for_cloud(cloud)
+    except ClientError as exc:
+        return _preflight_aws_client_error_result(rec, exc)
+    except BotoCoreError as exc:
+        return _preflight_boto_error_result(rec, exc)
     bucket = rec.resource_id
 
     # --- bucket exists ---

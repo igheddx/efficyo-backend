@@ -1,0 +1,70 @@
+# lambda.yaml — Detection rules for Lambda functions.
+#
+# Deprecated runtime prefixes mirror _OUTDATED_LAMBDA_RUNTIME_PREFIXES in
+# detection_extended_service.py.  Update both locations when new runtimes
+# are added to the deprecated list.
+
+rules:
+  - rule_id: lambda_outdated_runtime
+    enabled: true
+    resource_type: lambda_function
+    finding_type: lambda_outdated_runtime
+    recommendation_type: lambda_update_runtime
+    category: security
+    severity: high
+    impact: medium
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "Lambda function is using an outdated runtime"
+    summary_template: "Lambda function {resource_id} uses a runtime that is deprecated or past end-of-support."
+    why_this_matters: "Outdated runtimes no longer receive security patches, increasing vulnerability surface and risk of supply-chain issues."
+    guided_action_key: lambda_update_runtime
+    recommended_action: "Migrate to a supported runtime version; test in non-production before promoting."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: runtime
+        op: startswith_any
+        values:
+          - "python2."
+          - "python3.6"
+          - "python3.7"
+          - "python3.8"
+          - "nodejs10"
+          - "nodejs12"
+          - "nodejs14"
+          - "dotnetcore2."
+          - "dotnetcore3."
+          - "ruby2."
+          - "java8"
+    evidence_fields:
+      - runtime
+      - linked_resources
+
+  - rule_id: lambda_review_timeout_configuration
+    enabled: true
+    resource_type: lambda_function
+    finding_type: lambda_review_timeout_configuration
+    recommendation_type: lambda_review_timeout_configuration
+    category: security
+    severity: medium
+    impact: medium
+    effort: low
+    confidence: medium
+    actionability: guided
+    title: "Lambda function has a long timeout configuration"
+    summary_template: "Lambda function {resource_id} has a timeout of at least 120 seconds, which may mask hangs or runaway executions."
+    why_this_matters: "Long timeouts can silently absorb latency spikes, inflate cost, and delay alerting on real failures."
+    guided_action_key: lambda_review_timeout_configuration
+    recommended_action: "Review invocation duration in CloudWatch and tune timeout to match expected execution profile."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: timeout
+        op: gte
+        value: 120
+    evidence_fields:
+      - timeout
+      - linked_resources
+      - vpc_link_status

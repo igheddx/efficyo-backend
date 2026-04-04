@@ -1,5 +1,14 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _env_file = Path(__file__).resolve().parents[2] / ".env"
+    if _env_file.is_file():
+        _load_dotenv(dotenv_path=_env_file, override=False)
+except ImportError:
+    pass
 
 
 @dataclass(frozen=True)
@@ -49,6 +58,9 @@ class Settings:
     ses_from_name: str
     email_sandbox_mode: bool
     email_allowlist: str | None
+    # Optional explicit SES credentials (overrides default boto3 credential chain for email only).
+    ses_aws_access_key_id: str | None
+    ses_aws_secret_access_key: str | None
     frontend_url: str
     api_public_url: str
 
@@ -83,6 +95,8 @@ class Settings:
             "false" if environment == "prod" else "true",
         ).lower() in ("1", "true", "yes")
         email_allowlist = os.getenv("FPTNEXT_EMAIL_ALLOWLIST", "").strip() or None
+        ses_aws_access_key_id = os.getenv("FPTNEXT_SES_AWS_ACCESS_KEY_ID", "").strip() or None
+        ses_aws_secret_access_key = os.getenv("FPTNEXT_SES_AWS_SECRET_ACCESS_KEY", "").strip() or None
         frontend_url = os.getenv("FPTNEXT_FRONTEND_URL", "http://localhost:5173").strip() or "http://localhost:5173"
         api_public_url = os.getenv("FPTNEXT_API_PUBLIC_URL", "http://127.0.0.1:8000").strip() or "http://127.0.0.1:8000"
         enable_demo_seed = os.getenv("FPTNEXT_ENABLE_DEMO_AND_LOCAL_SEED", "true").lower() in (
@@ -145,6 +159,8 @@ class Settings:
             ses_from_name=ses_from_name,
             email_sandbox_mode=email_sandbox_mode,
             email_allowlist=email_allowlist,
+            ses_aws_access_key_id=ses_aws_access_key_id,
+            ses_aws_secret_access_key=ses_aws_secret_access_key,
             frontend_url=frontend_url,
             api_public_url=api_public_url,
         )

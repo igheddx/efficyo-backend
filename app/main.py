@@ -21,8 +21,17 @@ WORKER_HEARTBEAT_MAX_AGE_SECONDS = 180
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    from app.services import ingestion_job_service
+
     db = SessionLocal()
     try:
+        try:
+            reaped = ingestion_job_service.reap_orphaned_jobs(db)
+            if reaped:
+                import logging
+                logging.getLogger(__name__).warning("Reaped %d orphaned sync job(s) on startup.", reaped)
+        except (OperationalError, ProgrammingError):
+            pass
         try:
             auth_service.ensure_local_seed_users(db)
         except (OperationalError, ProgrammingError):

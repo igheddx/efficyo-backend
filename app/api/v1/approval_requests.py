@@ -16,9 +16,12 @@ from app.schemas.approval_request import (
     EligibleApproverRead,
 )
 from app.models.cloud_account import CloudAccount
+from app.models.recommendation import Recommendation
+from app.models.tenant import Tenant
 from app.services import (
     access_resolution_service,
     approval_request_service,
+    bulk_tagging_service,
     notification_service,
     tenant_scope_service,
 )
@@ -44,9 +47,27 @@ def _can_list(db_session: Session, ctx: UserContext, org_id) -> bool:
     return access_resolution_service.user_may_list_org_approval_requests(db_session, ctx, org_id)
 
 
+def _enrich_names(db_session: Session, req, d: dict) -> None:
+    """Attach tenant_name, cloud_account_name, and recommendation_type to the read dict."""
+    ta = db_session.query(Tenant.name).filter(Tenant.id == req.tenant_id).first()
+    ca = db_session.query(CloudAccount.name).filter(CloudAccount.id == req.cloud_account_id).first()
+    d["tenant_name"] = ta[0] if ta else None
+    d["cloud_account_name"] = ca[0] if ca else None
+    rt = (
+        db_session.query(Recommendation.recommendation_type)
+        .filter(
+            Recommendation.id == req.recommendation_id,
+            Recommendation.tenant_id == req.tenant_id,
+        )
+        .first()
+    )
+    d["recommendation_type"] = rt[0] if rt else None
+
+
 def _to_read(db_session: Session, req) -> ApprovalRequestRead:
     d = approval_request_service.request_to_read(req, include_assignments=False)
     d["recommendation_summary"] = approval_request_service.recommendation_summary_for_request(db_session, req)
+    _enrich_names(db_session, req, d)
     return ApprovalRequestRead.model_validate(d)
 
 
@@ -54,6 +75,7 @@ def _to_detail(db_session: Session, req) -> ApprovalRequestDetailRead:
     d = approval_request_service.request_to_read(req, include_assignments=True)
     assigns = d.pop("assignments", [])
     d["recommendation_summary"] = approval_request_service.recommendation_summary_for_request(db_session, req)
+    _enrich_names(db_session, req, d)
     return ApprovalRequestDetailRead(
         **d,
         assignments=[ApprovalAssignmentRead.model_validate(a) for a in assigns],
@@ -229,7 +251,10 @@ def list_approval_requests_endpoint(
         admin_view=admin_view,
     )
     return {
-        "items": [_to_read(db_session, r).model_dump(mode="json") for r in rows],
+        "items": [
+            (_to_detail(db_session, r) if pending_for_me else _to_read(db_session, r)).model_dump(mode="json")
+            for r in rows
+        ],
         "total": total,
     }
 
@@ -285,6 +310,7 @@ def approve_approval_request_endpoint(
             "forbidden": (status.HTTP_403_FORBIDDEN, "Approver role required."),
             "not_assigned_approver": (status.HTTP_403_FORBIDDEN, "You are not assigned to this request."),
             "assignment_already_acted": (status.HTTP_409_CONFLICT, "You have already acted on this assignment."),
+            "reject_comment_required": (status.HTTP_400_BAD_REQUEST, "A reason is required when rejecting."),
         }
         if msg in mapping:
             code, detail = mapping[msg]
@@ -322,9 +348,44 @@ def reject_approval_request_endpoint(
             "forbidden": (status.HTTP_403_FORBIDDEN, "Approver role required."),
             "not_assigned_approver": (status.HTTP_403_FORBIDDEN, "You are not assigned to this request."),
             "assignment_already_acted": (status.HTTP_409_CONFLICT, "You have already acted on this assignment."),
+            "reject_comment_required": (status.HTTP_400_BAD_REQUEST, "A reason is required when rejecting."),
         }
         if msg in mapping:
             code, detail = mapping[msg]
+            raise HTTPException(status_code=code, detail=detail) from exc
+        raise
+    return _to_detail(db_session, req)
+
+
+@router.post("/{request_id}/execute", response_model=ApprovalRequestDetailRead)
+def execute_approval_request_endpoint(
+    request_id: UUID,
+    db_session: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_user_context),
+) -> ApprovalRequestDetailRead:
+    """Execute a fully-approved request: apply tags (tagging) or mark as applied (non-tagging)."""
+    org_id = tenant_scope_service.require_data_access_organization_id(db_session, ctx)
+    if not _admin_list_view(db_session, ctx, org_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required to execute.")
+    try:
+        req = approval_request_service.execute_approval_request(
+            db_session,
+            request_id=request_id,
+            organization_id=org_id,
+            actor_email=ctx.email,
+            actor_role=ctx.role,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        mapping_exec = {
+            "approval_request_not_found": (status.HTTP_404_NOT_FOUND, "Approval request not found."),
+            "approval_request_not_ready": (
+                status.HTTP_409_CONFLICT,
+                "This request is not ready for execution (all approvers must approve first).",
+            ),
+        }
+        if msg in mapping_exec:
+            code, detail = mapping_exec[msg]
             raise HTTPException(status_code=code, detail=detail) from exc
         raise
     return _to_detail(db_session, req)

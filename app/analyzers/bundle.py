@@ -10,6 +10,7 @@ from app.models.recommendation import Recommendation
 from app.models.recommendation_outcome import RecommendationOutcome
 from app.models.sync_pipeline import SyncTask
 from app.services import detection_extended_service, detection_service, recommendation_service
+from app.rules import run_rule_engine
 from app.sync import repository
 
 
@@ -71,6 +72,7 @@ def analyzer_bundle(db: Session, task: SyncTask) -> dict[str, Any]:
     r_lambda = detection_service.detect_lambda_findings(db, tenant_id, cloud_account_id, sync_run_id)
     r_s3 = detection_service.detect_s3_findings(db, tenant_id, cloud_account_id, sync_run_id)
     r_ext = detection_extended_service.detect_extended_findings(db, tenant_id, cloud_account_id, sync_run_id)
+    r_rules = run_rule_engine(db, tenant_id, cloud_account_id, sync_run_id)
 
     rec_run = recommendation_service.generate_rds_recommendations(
         db, tenant_id, cloud_account_id, sync_run_id=sync_run_id
@@ -87,6 +89,7 @@ def analyzer_bundle(db: Session, task: SyncTask) -> dict[str, Any]:
             "lambda": getattr(r_lambda, "findings_created", None),
             "s3": getattr(r_s3, "findings_created", None),
             "extended": getattr(r_ext, "findings_created", None),
+            "rule_engine": getattr(r_rules, "findings_created", None),
         },
         "recommendations_created": getattr(rec_run, "recommendations_created", None),
     }

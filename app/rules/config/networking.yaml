@@ -1,0 +1,349 @@
+# networking.yaml — Detection rules for load balancers, route tables, and target groups.
+
+_lb_base: &lb_base
+  enabled: true
+  resource_type: load_balancer
+  category: security
+  severity: medium
+  approval_required: true
+  execution_eligible: false
+
+_tg_base: &tg_base
+  enabled: true
+  resource_type: target_group
+  category: reliability
+  approval_required: false
+  execution_eligible: false
+
+rules:
+  # ── Load balancer rules ────────────────────────────────────────────────────
+
+  - <<: *lb_base
+    rule_id: load_balancer_deletion_protection_disabled
+    finding_type: load_balancer_deletion_protection_disabled
+    recommendation_type: load_balancer_enable_deletion_protection
+    severity: medium
+    impact: medium
+    effort: low
+    confidence: high
+    actionability: guided
+    title: "Load balancer deletion protection is disabled"
+    summary_template: "Load balancer {resource_id} can be accidentally deleted, increasing availability and recovery risk."
+    why_this_matters: "Without deletion protection, a single AWS console click or IaC misconfiguration can remove a production load balancer."
+    guided_action_key: load_balancer_enable_deletion_protection
+    recommended_action: "Enable deletion protection in load balancer attributes via console or IaC."
+    conditions:
+      - field: deletion_protection_enabled
+        op: bool_false
+    evidence_fields:
+      - load_balancer_name
+      - scheme
+      - type
+      - deletion_protection_enabled
+
+  - <<: *lb_base
+    rule_id: load_balancer_no_healthy_targets
+    finding_type: load_balancer_no_healthy_targets
+    recommendation_type: load_balancer_review_target_health
+    severity: high
+    impact: high
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "Load balancer has no healthy targets"
+    summary_template: "Load balancer {resource_id} has target groups but no healthy backends, which can cause request failures."
+    why_this_matters: "All requests routed through this load balancer will fail until at least one healthy target is registered."
+    guided_action_key: load_balancer_review_target_health
+    recommended_action: "Open associated target groups, inspect health failure reasons, and restore service endpoints."
+    conditions:
+      - field: target_group_count
+        op: gt
+        value: 0
+      - field: healthy_target_count
+        op: eq
+        value: 0
+    evidence_fields:
+      - load_balancer_name
+      - target_group_count
+      - healthy_target_count
+      - linked_resources
+
+  - <<: *lb_base
+    rule_id: load_balancer_no_healthy_traffic_path
+    finding_type: load_balancer_no_healthy_traffic_path
+    recommendation_type: load_balancer_review_target_health
+    category: reliability
+    severity: high
+    impact: high
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "Load balancer has no healthy traffic path"
+    summary_template: "Load balancer {resource_id} has listeners and target groups configured but no healthy forwarding targets."
+    why_this_matters: "Listener rules point to target groups with no healthy members, meaning all live traffic is being dropped or errored."
+    guided_action_key: load_balancer_review_target_health
+    recommended_action: "Restore healthy targets or fix health check settings to re-establish forwarding paths."
+    conditions:
+      - field: listener_count
+        op: gt
+        value: 0
+      - field: target_group_count
+        op: gt
+        value: 0
+      - field: listener_forward_action_count
+        op: gt
+        value: 0
+      - field: healthy_target_count
+        op: eq
+        value: 0
+    evidence_fields:
+      - load_balancer_name
+      - listener_count
+      - target_group_count
+      - healthy_target_count
+      - listener_forward_action_count
+      - linked_resources
+
+  # load_balancer_unused: NOT migrated to config-driven yet.
+  # Reason: the original condition is (listener_count == 0 OR target_group_count == 0).
+  # The current evaluator supports implicit AND only.  OR support is planned for wave 2.
+  # This finding_type therefore remains in detection_extended_service.py.
+
+  - <<: *lb_base
+    rule_id: load_balancer_partial_failure
+    finding_type: load_balancer_partial_failure
+    recommendation_type: load_balancer_review_target_health
+    category: reliability
+    severity: medium
+    impact: medium
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "Load balancer has partial backend failure"
+    summary_template: "Load balancer {resource_id} has both healthy and unhealthy targets, indicating degraded backend reliability."
+    why_this_matters: "Partial failures reduce capacity and can cause user-visible errors as unhealthy instances absorb requests."
+    guided_action_key: load_balancer_review_target_health
+    recommended_action: "Investigate unhealthy target health reasons and restore all backends to healthy state."
+    conditions:
+      - field: healthy_target_count
+        op: gt
+        value: 0
+      - field: unhealthy_target_count
+        op: gt
+        value: 0
+    evidence_fields:
+      - load_balancer_name
+      - healthy_target_count
+      - unhealthy_target_count
+      - linked_resources
+
+  # ── Route table rules ──────────────────────────────────────────────────────
+
+  - rule_id: route_table_unassociated_review
+    enabled: true
+    resource_type: route_table
+    finding_type: route_table_unassociated_review
+    recommendation_type: route_table_cleanup_unused
+    category: governance
+    severity: low
+    impact: low
+    effort: low
+    confidence: high
+    actionability: guided
+    title: "Route table has no subnet associations"
+    summary_template: "Route table {resource_id} is not associated with any subnets and may be stale infrastructure."
+    why_this_matters: "Unassociated route tables are governance debt — they clutter the network inventory and may indicate incomplete IaC teardown."
+    guided_action_key: route_table_cleanup_unused
+    recommended_action: "Review whether the route table is intentionally reserved; delete it or document ownership if retained."
+    approval_required: true
+    execution_eligible: false
+    conditions:
+      - field: association_count
+        op: eq
+        value: 0
+    evidence_fields:
+      - association_count
+      - route_count
+
+  - rule_id: route_table_public_default_route_review
+    enabled: true
+    resource_type: route_table
+    finding_type: route_table_public_default_route_review
+    recommendation_type: route_table_review_public_egress
+    category: security
+    severity: medium
+    impact: high
+    effort: medium
+    confidence: medium
+    actionability: review_required
+    title: "Route table has a direct public default route"
+    summary_template: "Route table {resource_id} routes default traffic through an internet gateway without NAT mediation."
+    why_this_matters: "Direct internet routing exposes subnets to inbound traffic; private workloads should route through NAT or use VPC endpoints."
+    guided_action_key: route_table_review_public_egress
+    recommended_action: "Identify attached subnets, validate whether public egress is intended, and add NAT for private workloads."
+    approval_required: true
+    execution_eligible: false
+    conditions:
+      - field: has_igw_default_route
+        op: bool_true
+      - field: has_nat_default_route
+        op: bool_false
+    evidence_fields:
+      - has_igw_default_route
+      - has_nat_default_route
+      - linked_resources
+
+  # ── Target group rules ─────────────────────────────────────────────────────
+
+  - <<: *tg_base
+    rule_id: target_group_no_targets
+    finding_type: target_group_no_targets
+    recommendation_type: attach_targets_or_cleanup
+    severity: medium
+    impact: high
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "Target group has no registered targets"
+    summary_template: "Target group {resource_id} has no registered targets and cannot receive application traffic."
+    why_this_matters: "A target group with no members silently drops traffic from any load balancer listener that forwards to it."
+    guided_action_key: attach_targets_or_cleanup
+    recommended_action: "Register valid targets or detach the target group from listeners and clean up."
+    conditions:
+      - field: total_targets
+        op: eq
+        value: 0
+    evidence_fields:
+      - target_group_name
+      - total_targets
+      - load_balancer_arn
+
+  - <<: *tg_base
+    rule_id: target_group_unhealthy_targets
+    finding_type: target_group_unhealthy_targets
+    recommendation_type: investigate_unhealthy_targets
+    severity: high
+    impact: high
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "Target group has unhealthy targets"
+    summary_template: "Target group {resource_id} has unhealthy backends that can degrade or fail user traffic."
+    why_this_matters: "Unhealthy targets immediately reduce serving capacity and can cause request failures for users hitting those members."
+    guided_action_key: investigate_unhealthy_targets
+    recommended_action: "Open target group health details, diagnose failure codes, and restore endpoints to healthy state."
+    conditions:
+      - field: unhealthy_count
+        op: gt
+        value: 0
+    evidence_fields:
+      - target_group_name
+      - healthy_count
+      - unhealthy_count
+      - target_health_states
+
+  - <<: *tg_base
+    rule_id: target_group_no_healthy_targets
+    finding_type: target_group_no_healthy_targets
+    recommendation_type: target_group_review_target_health
+    severity: high
+    impact: high
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "Target group has no healthy targets"
+    summary_template: "Target group {resource_id} has registered targets but none are healthy — traffic to this group will fail."
+    why_this_matters: "All requests forwarded to this target group are being dropped; this is an active reliability incident."
+    guided_action_key: target_group_review_target_health
+    recommended_action: "Restore endpoints, fix health check paths, or adjust security group rules until all targets are healthy."
+    conditions:
+      - field: total_targets
+        op: gt
+        value: 0
+      - field: healthy_count
+        op: eq
+        value: 0
+    evidence_fields:
+      - target_group_name
+      - healthy_count
+      - unhealthy_count
+      - total_targets
+
+  # target_group_misconfigured_health_check: config-driven rule covers the
+  # health_check_enabled == false case.  The additional interval/timeout/threshold
+  # sub-conditions are retained in detection_extended_service.py until OR / complex
+  # numeric conditions are supported in wave 2.  The finding_type IS added to
+  # MIGRATED_FINDING_TYPES below so the legacy code is superseded.
+  - <<: *tg_base
+    rule_id: target_group_misconfigured_health_check
+    finding_type: target_group_misconfigured_health_check
+    recommendation_type: fix_health_check_configuration
+    severity: medium
+    impact: medium
+    effort: low
+    confidence: medium
+    actionability: guided
+    title: "Target group health check appears misconfigured"
+    summary_template: "Target group {resource_id} has health checking disabled or weak health check settings."
+    why_this_matters: "Poor health check configuration means broken targets are served traffic longer, worsening user impact during incidents."
+    guided_action_key: fix_health_check_configuration
+    recommended_action: "Review health check protocol, path, timeout, and thresholds; align with expected application startup time."
+    approval_required: false
+    execution_eligible: true
+    conditions:
+      - field: health_check_enabled
+        op: bool_false
+    evidence_fields:
+      - target_group_name
+      - health_check_enabled
+      - health_check_interval_seconds
+      - health_check_timeout_seconds
+      - unhealthy_threshold_count
+      - health_check_path
+
+  - <<: *tg_base
+    rule_id: target_group_stickiness_disabled
+    finding_type: target_group_stickiness_disabled
+    recommendation_type: target_group_enable_stickiness
+    severity: low
+    impact: low
+    effort: low
+    confidence: medium
+    actionability: guided
+    title: "Target group has session stickiness disabled"
+    summary_template: "Target group {resource_id} does not have session stickiness enabled."
+    why_this_matters: "For stateful applications, stickiness prevents session loss during load-balanced request routing."
+    guided_action_key: target_group_enable_stickiness
+    recommended_action: "Enable stickiness and choose an appropriate duration if targets maintain stateful sessions."
+    approval_required: false
+    execution_eligible: true
+    conditions:
+      - field: stickiness_enabled
+        op: bool_false
+    evidence_fields:
+      - target_group_name
+      - stickiness_enabled
+
+  - <<: *tg_base
+    rule_id: target_group_slow_deregistration
+    finding_type: target_group_slow_deregistration
+    recommendation_type: target_group_optimize_deregistration_delay
+    severity: low
+    impact: low
+    effort: low
+    confidence: high
+    actionability: guided
+    title: "Target group has a long deregistration delay"
+    summary_template: "Target group {resource_id} has a deregistration delay over 60 seconds, which can extend traffic loss during deployments."
+    why_this_matters: "Long deregistration delays mean traffic continues to be routed to draining instances for extended periods, prolonging error windows."
+    guided_action_key: target_group_optimize_deregistration_delay
+    recommended_action: "Reduce deregistration delay to 30-60 seconds if the workload allows graceful shutdown within that window."
+    approval_required: false
+    execution_eligible: true
+    conditions:
+      - field: deregistration_delay_seconds
+        op: gt
+        value: 60
+    evidence_fields:
+      - target_group_name
+      - deregistration_delay_seconds

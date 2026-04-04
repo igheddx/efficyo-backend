@@ -26,6 +26,11 @@ class GroupedItemRead(BaseModel):
     severity_summary: dict[str, int] | None = None
     risk_summary: dict[str, int] | None = None
     workflow_summary: dict[str, int] | None = None
+    impact_summary: dict[str, int] | None = None
+    effort_summary: dict[str, int] | None = None
+    confidence_summary: dict[str, int] | None = None
+    actionability_summary: dict[str, int] | None = None
+    priority_group_summary: dict[str, int] | None = None
     owner_summary: dict[str, int] | None = None
     related_recommendation_type: str | None = None
     guided_actions: list[str] = Field(default_factory=list)

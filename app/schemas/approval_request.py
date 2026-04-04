@@ -64,6 +64,10 @@ class ApprovalRequestRead(BaseModel):
     execution_owner_name: str | None = None
     execution_owner_role: str | None = None
     tag_values: dict[str, str] | None = None
+    tenant_name: Optional[str] = None
+    cloud_account_name: Optional[str] = None
+    recommendation_type: Optional[str] = None
+    executed_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 

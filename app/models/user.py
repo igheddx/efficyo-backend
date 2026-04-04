@@ -30,6 +30,7 @@ class User(Base):
     temporary_password_expires_at = Column(DateTime(timezone=True), nullable=True)
     last_login_at = Column(DateTime(timezone=True), nullable=True)
     is_root_admin = Column(Boolean, nullable=False, default=False)
+    receive_approval_emails = Column(Boolean, nullable=False, default=False)
     auth_provider = Column(String(64), nullable=False, default="local")
     external_subject_id = Column(String(512), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)

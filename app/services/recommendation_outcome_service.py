@@ -319,6 +319,8 @@ def mark_recommendation_acted_on(
     existing.baseline_monthly_cost = baseline_cost
     existing.notes = notes if notes is not None else existing.notes
 
+    recommendation.state = "resolved"
+
     _apply_proof_after_snapshot(db_session, existing, tenant_id, cloud_account_id)
 
     # current_monthly_cost + legacy realized_savings refreshed when outcomes are listed if no proof pair.

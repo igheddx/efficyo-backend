@@ -171,12 +171,22 @@ class RecommendationRead(BaseModel):
     ai_explanation: str | None = None
     explanation: str
     risk_level: str
+    impact_score: str
+    effort_score: str
     confidence_score: str
+    actionability_type: str
+    computed_score: float | None = None
+    priority_bucket: str | None = None
+    priority_group: str | None = None
     recommended_action: str
     estimated_savings: float | None = None
     savings_basis: str | None = None
     confidence_reason: str | None = None
+    confidence_reasoning: str | None = None
     why_it_matters: str | None = None
+    why_this_matters: str | None = None
+    expected_impact: str | None = None
+    effort_explanation: str | None = None
     learned_confidence: str | None = None
     learned_confidence_reason: str | None = None
     historical_success_rate: float | None = None
@@ -185,6 +195,15 @@ class RecommendationRead(BaseModel):
     estimated_time: str | None = None
     difficulty: str | None = None
     workflow_status: str | None = None
+    state: str = "active"
+    snoozed_until: datetime | None = None
+    snoozed_by: str | None = None
+    dismissed_reason: str | None = None
+    dismissed_reason_note: str | None = None
+    dismissed_at: datetime | None = None
+    dismissed_by: str | None = None
+    resolved_at: datetime | None = None
+    resolution_source: str | None = None
     approved_by: str | None = None
     approved_role: str | None = None
     approved_at: datetime | None = None
@@ -208,6 +227,41 @@ class RecommendationRunRead(BaseModel):
     created_at: datetime
 
 
+class RecommendationSnoozeRequest(BaseModel):
+    days: int | None = Field(default=None, ge=1, le=365)
+    snoozed_until: datetime | None = None
+
+
+class RecommendationDismissRequest(BaseModel):
+    reason: str
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class RecommendationStateUpdateRead(BaseModel):
+    recommendation_id: UUID
+    state: str
+    snoozed_until: datetime | None = None
+    dismissed_reason: str | None = None
+    dismissed_reason_note: str | None = None
+    dismissed_at: datetime | None = None
+    resolved_at: datetime | None = None
+    resolution_source: str | None = None
+
+
+class RecommendationBulkStateRequest(BaseModel):
+    recommendation_ids: list[UUID] = Field(default_factory=list)
+    action: str
+    days: int | None = Field(default=None, ge=1, le=365)
+    snoozed_until: datetime | None = None
+    reason: str | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class RecommendationBulkStateResultRead(BaseModel):
+    updated_count: int
+    updated_ids: list[UUID]
+
+
 class SummaryRecommendationRead(BaseModel):
     recommendation_id: UUID
     resource_id: str
@@ -216,7 +270,11 @@ class SummaryRecommendationRead(BaseModel):
     summary: str
     estimated_savings: float | None = None
     risk_level: str
+    impact_score: str | None = None
+    effort_score: str | None = None
     confidence_score: str
+    actionability_type: str | None = None
+    priority_group: str | None = None
     learned_confidence: str | None = None
     learned_confidence_reason: str | None = None
     historical_success_rate: float | None = None
@@ -335,7 +393,10 @@ class SimulationRead(BaseModel):
     impact_summary: str
     risk_reduction: str
     estimated_savings: float | None = None
+    impact_score: str | None = None
+    effort_score: str | None = None
     confidence_score: str
+    actionability_type: str | None = None
 
 
 class TopOpportunityRead(BaseModel):
@@ -348,7 +409,10 @@ class TopOpportunityRead(BaseModel):
     ai_explanation: str | None = None
     estimated_savings: float | None = None
     risk_level: str
+    impact_score: str
+    effort_score: str
     confidence_score: str
+    actionability_type: str
     computed_score: float
     normalized_savings: float
     risk_factor: float
@@ -356,9 +420,14 @@ class TopOpportunityRead(BaseModel):
     urgency_factor: float
     ranking_reason: str
     priority_bucket: str
+    priority_group: str | None = None
     savings_basis: str | None = None
     confidence_reason: str | None = None
+    confidence_reasoning: str | None = None
     why_it_matters: str | None = None
+    why_this_matters: str | None = None
+    expected_impact: str | None = None
+    effort_explanation: str | None = None
     learned_confidence: str | None = None
     learned_confidence_reason: str | None = None
     historical_success_rate: float | None = None
@@ -385,6 +454,11 @@ class ActionPlanItemRead(BaseModel):
     summary: str
     estimated_savings: float | None = None
     risk_level: str
+    impact_score: str | None = None
+    effort_score: str | None = None
+    confidence_score: str | None = None
+    actionability_type: str | None = None
+    priority_group: str | None = None
     reason: str
     expected_impact: str
 

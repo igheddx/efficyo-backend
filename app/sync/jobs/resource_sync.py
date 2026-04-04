@@ -4,6 +4,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.rules import run_rule_engine
 from app.services import detection_extended_service, detection_service, ingestion_service, recommendation_service
 
 
@@ -22,6 +23,7 @@ class ResourceSyncJobRunner:
         detection_service.detect_lambda_findings(db, tenant_id, cloud_account_id, sync_run_id)
         detection_service.detect_s3_findings(db, tenant_id, cloud_account_id, sync_run_id)
         detection_extended_service.detect_extended_findings(db, tenant_id, cloud_account_id, sync_run_id)
+        run_rule_engine(db, tenant_id, cloud_account_id, sync_run_id)
 
         recommendation_service.generate_rds_recommendations(db, tenant_id, cloud_account_id, sync_run_id=sync_run_id)
         return {"status": "ok"}

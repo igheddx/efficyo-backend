@@ -116,6 +116,11 @@ def test_grouped_findings_and_recommendations_endpoints(client, db, dev_org_scop
     assert tag_group is not None
     assert tag_group["total_count"] == len(recs)
     assert tag_group["resource_type_breakdown"]["ec2_instance"] == len(recs)
+    assert tag_group["impact_summary"]["low"] == len(recs)
+    assert tag_group["effort_summary"]["low"] == len(recs)
+    assert tag_group["confidence_summary"]["high"] == len(recs)
+    assert tag_group["actionability_summary"]["guided"] == len(recs)
+    assert tag_group["priority_group_summary"]["optional_cleanup"] == len(recs)
 
     finding_resp = client.get(
         f"/api/v1/tenants/{tenant.id}/cloud-accounts/{cloud.id}/findings/grouped",

@@ -1,7 +1,7 @@
 """Recommendation service for RDS findings."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import re
 from uuid import UUID
@@ -28,12 +28,45 @@ from app.services.recommendation_credibility import (
     savings_basis_for,
     why_it_matters_for,
 )
+from app.services.recommendation_scoring import (
+    apply_scoring_profile,
+    priority_group_for,
+    recommendation_sort_key,
+    resolved_scoring_profile,
+)
 from app.services import detection_service, recommendation_intelligence_service, recommendation_outcome_service
 from app.services.cloud_account_service import get_cloud_account_or_raise as _get_cloud_account_or_raise
 from app.services.resource_capability_registry import TAG_GOVERNANCE_FINDING_TO_RECOMMENDATION
 
 
 logger = logging.getLogger(__name__)
+
+
+RECOMMENDATION_STATE_ACTIVE = "active"
+RECOMMENDATION_STATE_ACCEPTED = "accepted"
+RECOMMENDATION_STATE_IN_PROGRESS = "in_progress"
+RECOMMENDATION_STATE_SNOOZED = "snoozed"
+RECOMMENDATION_STATE_DISMISSED = "dismissed"
+RECOMMENDATION_STATE_RESOLVED = "resolved"
+RECOMMENDATION_STATE_CLOSED = "closed"
+
+_ALL_RECOMMENDATION_STATES = {
+    RECOMMENDATION_STATE_ACTIVE,
+    RECOMMENDATION_STATE_ACCEPTED,
+    RECOMMENDATION_STATE_IN_PROGRESS,
+    RECOMMENDATION_STATE_SNOOZED,
+    RECOMMENDATION_STATE_DISMISSED,
+    RECOMMENDATION_STATE_RESOLVED,
+    RECOMMENDATION_STATE_CLOSED,
+}
+
+_DISMISS_REASONS = {
+    "not_applicable",
+    "already_handled",
+    "risk_accepted",
+    "false_positive",
+    "other",
+}
 
 
 @dataclass
@@ -43,6 +76,12 @@ class RecommendationRunResult:
     cloud_account_id: UUID
     recommendations_created: int
     created_at: datetime
+
+
+@dataclass
+class RecommendationBulkStateResult:
+    updated_count: int
+    updated_ids: list[UUID]
 
 
 @dataclass
@@ -58,7 +97,10 @@ class TopOpportunity:
     ai_explanation: str | None
     estimated_savings: float | None
     risk_level: str
+    impact_score: str
+    effort_score: str
     confidence_score: str
+    actionability_type: str
     computed_score: float
     normalized_savings: float
     risk_factor: float
@@ -66,9 +108,14 @@ class TopOpportunity:
     urgency_factor: float
     ranking_reason: str
     priority_bucket: str
+    priority_group: str
     savings_basis: str
     confidence_reason: str
+    confidence_reasoning: str
     why_it_matters: str
+    why_this_matters: str
+    expected_impact: str
+    effort_explanation: str
     learned_confidence: str | None
     learned_confidence_reason: str | None
     historical_success_rate: float | None
@@ -584,9 +631,14 @@ def recommendation_read_from_orm(
 ) -> RecommendationRead:
     """Build API model with rank-derived why_it_matters (not stored on the row)."""
     steps, estimated_time, difficulty = guided_actions_for_type(rec.recommendation_type)
+    scoring = resolved_scoring_profile(rec)
+    computed_score = computed_impact_score(rec)
     payload_evidence = dict(evidence_json or {})
     for k, v in _impact_story_for_recommendation(rec.recommendation_type).items():
         payload_evidence.setdefault(k, v)
+    payload_evidence.setdefault("effort_explanation", scoring.effort_explanation)
+    payload_evidence.setdefault("confidence_reasoning", scoring.confidence_reasoning)
+    effective_state = _effective_state_for_read(rec, utc_now())
 
     return RecommendationRead(
         id=rec.id,
@@ -608,7 +660,13 @@ def recommendation_read_from_orm(
         ),
         explanation=rec.explanation,
         risk_level=rec.risk_level,
-        confidence_score=rec.confidence_score,
+        impact_score=scoring.impact_score,
+        effort_score=scoring.effort_score,
+        confidence_score=scoring.confidence_score,
+        actionability_type=scoring.actionability_type,
+        computed_score=computed_score,
+        priority_bucket=priority_bucket_for(rec),
+        priority_group=priority_group_for(rec),
         recommended_action=rec.recommended_action,
         estimated_savings=(
             round_currency(rec.estimated_savings) if rec.estimated_savings is not None else None
@@ -616,7 +674,11 @@ def recommendation_read_from_orm(
         created_at=rec.created_at,
         savings_basis=effective_savings_basis(rec),
         confidence_reason=effective_confidence_reason(rec),
+        confidence_reasoning=scoring.confidence_reasoning,
         why_it_matters=why_it_matters_for(rank, rec.recommendation_category),
+        why_this_matters=payload_evidence.get("why_this_matters"),
+        expected_impact=payload_evidence.get("expected_impact"),
+        effort_explanation=payload_evidence.get("effort_explanation"),
         learned_confidence=None,
         learned_confidence_reason=None,
         historical_success_rate=None,
@@ -625,6 +687,15 @@ def recommendation_read_from_orm(
         estimated_time=estimated_time,
         difficulty=difficulty,
         workflow_status=None,
+        state=effective_state,
+        snoozed_until=rec.snoozed_until,
+        snoozed_by=rec.snoozed_by,
+        dismissed_reason=rec.dismissed_reason,
+        dismissed_reason_note=rec.dismissed_reason_note,
+        dismissed_at=rec.dismissed_at,
+        dismissed_by=rec.dismissed_by,
+        resolved_at=rec.resolved_at,
+        resolution_source=rec.resolution_source,
         approved_by=None,
         approved_at=None,
         applied_by=None,
@@ -641,6 +712,7 @@ def _enrich_recommendation_read(
     outcome_by_recommendation_id: dict[UUID, RecommendationOutcome] | None = None,
 ) -> RecommendationRead:
     layer = recommendation_intelligence_service.learned_intelligence_for_recommendation(rec, stats_by_type)
+    scoring = resolved_scoring_profile(rec)
     outcome = (outcome_by_recommendation_id or {}).get(rec.id)
     workflow_layer = {}
     if outcome is not None:
@@ -658,7 +730,21 @@ def _enrich_recommendation_read(
             "applied_at": outcome.applied_at,
             "execution_notes": outcome.execution_notes,
         }
-    return read.model_copy(update={**layer, **workflow_layer})
+    return read.model_copy(
+        update={
+            **layer,
+            **workflow_layer,
+            "impact_score": scoring.impact_score,
+            "effort_score": scoring.effort_score,
+            "confidence_score": scoring.confidence_score,
+            "actionability_type": scoring.actionability_type,
+            "computed_score": computed_impact_score(rec),
+            "priority_bucket": priority_bucket_for(rec),
+            "priority_group": priority_group_for(rec),
+            "confidence_reasoning": scoring.confidence_reasoning,
+            "effort_explanation": scoring.effort_explanation,
+        }
+    )
 
 
 def _nat_gateway_explanation(finding: Finding) -> str:
@@ -756,6 +842,39 @@ def _build_recommendation_for_finding(
     created_at: datetime,
 ) -> Recommendation | None:
     estimated_savings = finding.estimated_savings
+
+    # ------------------------------------------------------------------
+    # Config-driven path: check if this finding type has a rule definition.
+    # Use rule metadata for recommendation fields; fall through to legacy
+    # code for finding types not yet migrated.
+    # ------------------------------------------------------------------
+    from app.rules.registry import get_rule_for_finding  # lazy import avoids circular dep
+    _rule = get_rule_for_finding(finding.finding_type)
+    if _rule is not None:
+        rtype = _rule.recommendation_type
+        rcat = _rule.category
+        sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
+        ev = finding.evidence_json or {}
+        summary_text = ev.get("title") or _rule.title
+        explanation_text = ev.get("summary") or _rule.summary_template
+        return Recommendation(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding_id=finding.id,
+            resource_id=finding.resource_id,
+            resource_type=finding.resource_type,
+            recommendation_type=rtype,
+            recommendation_category=rcat,
+            summary=summary_text,
+            explanation=explanation_text,
+            risk_level=_rule.severity,
+            confidence_score=_rule.confidence,
+            recommended_action=_rule.recommended_action,
+            estimated_savings=estimated_savings,
+            savings_basis=sb,
+            confidence_reason=cr,
+            created_at=created_at,
+        )
 
     tag_map = _GOVERNANCE_TAG_FINDING_TO_RECOMMENDATION.get(finding.finding_type)
     if tag_map:
@@ -2143,6 +2262,170 @@ _RECOMMENDATION_SOURCE_FINDING_TYPES = (
 )
 
 
+def _effective_state_for_read(rec: Recommendation, now: datetime) -> str:
+    state = (rec.state or RECOMMENDATION_STATE_ACTIVE).lower()
+    if state == RECOMMENDATION_STATE_SNOOZED and rec.snoozed_until is not None:
+        snoozed_until = rec.snoozed_until
+        cmp_now = now
+        # SQLite tests can return naive datetimes even for timezone-aware columns.
+        if snoozed_until.tzinfo is None and cmp_now.tzinfo is not None:
+            cmp_now = cmp_now.replace(tzinfo=None)
+        elif snoozed_until.tzinfo is not None and cmp_now.tzinfo is None:
+            cmp_now = cmp_now.replace(tzinfo=snoozed_until.tzinfo)
+        if snoozed_until <= cmp_now:
+            return RECOMMENDATION_STATE_ACTIVE
+    if state in _ALL_RECOMMENDATION_STATES:
+        return state
+    return RECOMMENDATION_STATE_ACTIVE
+
+
+def _matches_state_view(state: str, view: str) -> bool:
+    v = str(view or "active").strip().lower()
+    if v == "all":
+        return True
+    if v == "active":
+        return state in {RECOMMENDATION_STATE_ACTIVE, RECOMMENDATION_STATE_ACCEPTED, RECOMMENDATION_STATE_IN_PROGRESS}
+    if v == "snoozed":
+        return state == RECOMMENDATION_STATE_SNOOZED
+    if v == "dismissed":
+        return state == RECOMMENDATION_STATE_DISMISSED
+    if v == "resolved":
+        return state in {RECOMMENDATION_STATE_RESOLVED, RECOMMENDATION_STATE_CLOSED}
+    return state in {RECOMMENDATION_STATE_ACTIVE, RECOMMENDATION_STATE_ACCEPTED, RECOMMENDATION_STATE_IN_PROGRESS}
+
+
+def _recommendation_key(resource_id: str, finding_type: str, recommendation_type: str) -> tuple[str, str, str]:
+    return (str(resource_id or ""), str(finding_type or ""), str(recommendation_type or ""))
+
+
+def _apply_candidate_fields(target: Recommendation, candidate: Recommendation) -> None:
+    target.finding_id = candidate.finding_id
+    target.resource_id = candidate.resource_id
+    target.resource_type = candidate.resource_type
+    target.finding_type = candidate.finding_type
+    target.recommendation_type = candidate.recommendation_type
+    target.recommendation_category = candidate.recommendation_category
+    target.summary = candidate.summary
+    target.explanation = candidate.explanation
+    target.risk_level = candidate.risk_level
+    target.impact_score = candidate.impact_score
+    target.effort_score = candidate.effort_score
+    target.recommended_action = candidate.recommended_action
+    target.confidence_score = candidate.confidence_score
+    target.actionability_type = candidate.actionability_type
+    target.estimated_savings = candidate.estimated_savings
+    target.savings_basis = candidate.savings_basis
+    target.confidence_reason = candidate.confidence_reason
+
+
+def _normalize_dismiss_reason(reason: str | None) -> str:
+    r = str(reason or "").strip().lower()
+    if r not in _DISMISS_REASONS:
+        raise ValueError("invalid_dismiss_reason")
+    return r
+
+
+def _upsert_recommendations_for_findings(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    latest_findings: list[Finding],
+    created_at: datetime,
+) -> tuple[list[Recommendation], list[Recommendation], list[Recommendation]]:
+    candidates_by_key: dict[tuple[str, str, str], Recommendation] = {}
+    for finding in latest_findings:
+        recommendation = _build_recommendation_for_finding(
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            finding=finding,
+            created_at=created_at,
+        )
+        if recommendation is None:
+            continue
+        recommendation.finding_type = finding.finding_type
+        recommendation.state = RECOMMENDATION_STATE_ACTIVE
+        recommendation = apply_scoring_profile(recommendation)
+        key = _recommendation_key(recommendation.resource_id, recommendation.finding_type, recommendation.recommendation_type)
+        if key not in candidates_by_key:
+            candidates_by_key[key] = recommendation
+
+    existing_ranked = (
+        db_session.query(
+            Recommendation.id.label("recommendation_id"),
+            func.row_number()
+            .over(
+                partition_by=(
+                    Recommendation.resource_id,
+                    Recommendation.finding_type,
+                    Recommendation.recommendation_type,
+                ),
+                order_by=(Recommendation.created_at.desc(), Recommendation.id.desc()),
+            )
+            .label("row_num"),
+        )
+        .filter(
+            Recommendation.tenant_id == tenant_id,
+            Recommendation.cloud_account_id == cloud_account_id,
+        )
+        .subquery()
+    )
+    existing_latest = (
+        db_session.query(Recommendation)
+        .join(existing_ranked, Recommendation.id == existing_ranked.c.recommendation_id)
+        .filter(existing_ranked.c.row_num == 1)
+        .all()
+    )
+    existing_by_key = {
+        _recommendation_key(r.resource_id, r.finding_type, r.recommendation_type): r for r in existing_latest
+    }
+
+    touched_existing: list[Recommendation] = []
+    new_recommendations: list[Recommendation] = []
+    resolved_recommendations: list[Recommendation] = []
+    matched_keys: set[tuple[str, str, str]] = set()
+
+    for key, candidate in candidates_by_key.items():
+        existing = existing_by_key.get(key)
+        if existing is None:
+            new_recommendations.append(candidate)
+            continue
+
+        matched_keys.add(key)
+        _apply_candidate_fields(existing, candidate)
+        cur_state = _effective_state_for_read(existing, created_at)
+        if cur_state == RECOMMENDATION_STATE_DISMISSED:
+            pass
+        elif existing.state == RECOMMENDATION_STATE_SNOOZED and cur_state == RECOMMENDATION_STATE_ACTIVE:
+            existing.state = RECOMMENDATION_STATE_ACTIVE
+            existing.snoozed_until = None
+            existing.snoozed_by = None
+        elif cur_state == RECOMMENDATION_STATE_SNOOZED:
+            if existing.snoozed_until is None or existing.snoozed_until <= created_at:
+                existing.state = RECOMMENDATION_STATE_ACTIVE
+                existing.snoozed_until = None
+                existing.snoozed_by = None
+        elif cur_state in {RECOMMENDATION_STATE_RESOLVED, RECOMMENDATION_STATE_CLOSED}:
+            existing.state = RECOMMENDATION_STATE_ACTIVE
+
+        if existing.state != RECOMMENDATION_STATE_RESOLVED:
+            existing.resolved_at = None
+            existing.resolution_source = None
+        touched_existing.append(existing)
+
+    for key, existing in existing_by_key.items():
+        if key in matched_keys:
+            continue
+        if _effective_state_for_read(existing, created_at) == RECOMMENDATION_STATE_DISMISSED:
+            continue
+        if existing.state != RECOMMENDATION_STATE_RESOLVED:
+            existing.state = RECOMMENDATION_STATE_RESOLVED
+            existing.resolved_at = created_at
+            existing.resolution_source = "auto"
+            resolved_recommendations.append(existing)
+
+    return new_recommendations, touched_existing, resolved_recommendations
+
+
 def generate_rds_recommendations(
     db_session: Session,
     tenant_id: UUID,
@@ -2211,20 +2494,18 @@ def generate_rds_recommendations(
     if latest_findings:
         latest_findings = detection_service.deduplicate_aurora_serverless_review_findings(latest_findings)
 
-    recommendations: list[Recommendation] = []
-    for finding in latest_findings:
-        recommendation = _build_recommendation_for_finding(
-            tenant_id=tenant_id,
-            cloud_account_id=cloud_account_id,
-            finding=finding,
-            created_at=created_at,
-        )
-        if recommendation is not None:
-            recommendations.append(recommendation)
+    new_recommendations, touched_existing, resolved_recommendations = _upsert_recommendations_for_findings(
+        db_session=db_session,
+        tenant_id=tenant_id,
+        cloud_account_id=cloud_account_id,
+        latest_findings=latest_findings,
+        created_at=created_at,
+    )
 
-    if recommendations:
+    if new_recommendations or touched_existing or resolved_recommendations:
         try:
-            db_session.add_all(recommendations)
+            if new_recommendations:
+                db_session.add_all(new_recommendations)
             db_session.commit()
         except Exception:
             db_session.rollback()
@@ -2233,14 +2514,16 @@ def generate_rds_recommendations(
                 extra={
                     "tenant_id": str(tenant_id),
                     "cloud_account_id": str(cloud_account_id),
-                    "recommendations_count": len(recommendations),
+                    "new_recommendations_count": len(new_recommendations),
+                    "updated_recommendations_count": len(touched_existing),
+                    "resolved_recommendations_count": len(resolved_recommendations),
                 },
             )
             raise
 
     return RecommendationRunResult(
         cloud_account_id=cloud_account_id,
-        recommendations_created=len(recommendations),
+        recommendations_created=len(new_recommendations),
         created_at=created_at,
     )
 
@@ -2276,12 +2559,13 @@ def list_recommendations(
     tenant_id: UUID,
     cloud_account_id: UUID,
     latest_only: bool = True,
+    state_view: str = "active",
 ) -> list[Recommendation]:
     """List recommendations for a tenant-scoped cloud account."""
     _get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
 
     if not latest_only:
-        return (
+        rows = (
             db_session.query(Recommendation)
             .filter(
                 Recommendation.tenant_id == tenant_id,
@@ -2290,13 +2574,15 @@ def list_recommendations(
             .order_by(Recommendation.created_at.desc(), Recommendation.id.desc())
             .all()
         )
+        now = utc_now()
+        return [r for r in rows if _matches_state_view(_effective_state_for_read(r, now), state_view)]
 
     ranked_recommendations = (
         db_session.query(
             Recommendation.id.label("recommendation_id"),
             func.row_number()
             .over(
-                partition_by=(Recommendation.resource_id, Recommendation.recommendation_type),
+                partition_by=(Recommendation.resource_id, Recommendation.finding_type, Recommendation.recommendation_type),
                 order_by=(Recommendation.created_at.desc(), Recommendation.id.desc()),
             )
             .label("row_num"),
@@ -2315,7 +2601,163 @@ def list_recommendations(
         .order_by(Recommendation.created_at.desc(), Recommendation.id.desc())
         .all()
     )
-    return _dedupe_aurora_serverless_recommendations(rows)
+    rows = _dedupe_aurora_serverless_recommendations(rows)
+    now = utc_now()
+    return [r for r in rows if _matches_state_view(_effective_state_for_read(r, now), state_view)]
+
+
+def _get_recommendation_for_scope(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+) -> Recommendation:
+    row = (
+        db_session.query(Recommendation)
+        .filter(
+            Recommendation.id == recommendation_id,
+            Recommendation.tenant_id == tenant_id,
+            Recommendation.cloud_account_id == cloud_account_id,
+        )
+        .first()
+    )
+    if row is None:
+        raise ValueError("recommendation_not_found")
+    return row
+
+
+def snooze_recommendation(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+    *,
+    actor: str | None,
+    days: int | None = None,
+    snoozed_until: datetime | None = None,
+) -> Recommendation:
+    _get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    rec = _get_recommendation_for_scope(db_session, tenant_id, cloud_account_id, recommendation_id)
+    if snoozed_until is None:
+        if days is None:
+            days = 7
+        snoozed_until = utc_now() + timedelta(days=int(days))
+    rec.state = RECOMMENDATION_STATE_SNOOZED
+    rec.snoozed_until = snoozed_until
+    rec.snoozed_by = actor
+    rec.resolved_at = None
+    rec.resolution_source = None
+    db_session.commit()
+    return rec
+
+
+def dismiss_recommendation(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+    *,
+    actor: str | None,
+    reason: str,
+    note: str | None,
+) -> Recommendation:
+    _get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    rec = _get_recommendation_for_scope(db_session, tenant_id, cloud_account_id, recommendation_id)
+    rec.state = RECOMMENDATION_STATE_DISMISSED
+    rec.dismissed_reason = _normalize_dismiss_reason(reason)
+    rec.dismissed_reason_note = (note or "").strip() or None
+    rec.dismissed_at = utc_now()
+    rec.dismissed_by = actor
+    rec.resolved_at = None
+    rec.resolution_source = None
+    db_session.commit()
+    return rec
+
+
+def reactivate_recommendation(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+) -> Recommendation:
+    _get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    rec = _get_recommendation_for_scope(db_session, tenant_id, cloud_account_id, recommendation_id)
+    rec.state = RECOMMENDATION_STATE_ACTIVE
+    rec.snoozed_until = None
+    rec.snoozed_by = None
+    rec.dismissed_reason = None
+    rec.dismissed_reason_note = None
+    rec.dismissed_at = None
+    rec.dismissed_by = None
+    rec.resolved_at = None
+    rec.resolution_source = None
+    db_session.commit()
+    return rec
+
+
+def bulk_update_recommendation_state(
+    db_session: Session,
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_ids: list[UUID],
+    *,
+    action: str,
+    actor: str | None,
+    days: int | None = None,
+    snoozed_until: datetime | None = None,
+    reason: str | None = None,
+    note: str | None = None,
+) -> RecommendationBulkStateResult:
+    _get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
+    ids = [UUID(str(x)) for x in recommendation_ids]
+    if not ids:
+        return RecommendationBulkStateResult(updated_count=0, updated_ids=[])
+    rows = (
+        db_session.query(Recommendation)
+        .filter(
+            Recommendation.tenant_id == tenant_id,
+            Recommendation.cloud_account_id == cloud_account_id,
+            Recommendation.id.in_(ids),
+        )
+        .all()
+    )
+
+    act = str(action or "").strip().lower()
+    if act not in {"snooze", "dismiss", "reactivate"}:
+        raise ValueError("invalid_bulk_action")
+
+    updated: list[UUID] = []
+    now = utc_now()
+    for row in rows:
+        if act == "snooze":
+            row.state = RECOMMENDATION_STATE_SNOOZED
+            row.snoozed_until = snoozed_until or (now + timedelta(days=int(days or 7)))
+            row.snoozed_by = actor
+            row.resolved_at = None
+            row.resolution_source = None
+        elif act == "dismiss":
+            row.state = RECOMMENDATION_STATE_DISMISSED
+            row.dismissed_reason = _normalize_dismiss_reason(reason)
+            row.dismissed_reason_note = (note or "").strip() or None
+            row.dismissed_at = now
+            row.dismissed_by = actor
+            row.resolved_at = None
+            row.resolution_source = None
+        else:
+            row.state = RECOMMENDATION_STATE_ACTIVE
+            row.snoozed_until = None
+            row.snoozed_by = None
+            row.dismissed_reason = None
+            row.dismissed_reason_note = None
+            row.dismissed_at = None
+            row.dismissed_by = None
+            row.resolved_at = None
+            row.resolution_source = None
+        updated.append(row.id)
+
+    if updated:
+        db_session.commit()
+    return RecommendationBulkStateResult(updated_count=len(updated), updated_ids=updated)
 
 
 def get_top_opportunities(
@@ -2358,7 +2800,7 @@ def get_top_opportunities(
     savings_values = [float(r.estimated_savings) for r in recommendations if r.estimated_savings is not None]
     max_savings = max(savings_values) if savings_values else 0.0
 
-    opportunities: list[TopOpportunity] = []
+    opportunities: list[tuple[tuple, TopOpportunity]] = []
     findings_by_id = {
         f.id: f
         for f in (
@@ -2373,10 +2815,13 @@ def get_top_opportunities(
     for rec in recommendations:
         factors = decision_factors_for(rec, max_savings)
         total_score = computed_impact_score(rec, max_savings)
+        scoring = resolved_scoring_profile(rec)
         learned = recommendation_intelligence_service.learned_intelligence_for_recommendation(rec, stats_by_type)
         steps, estimated_time, difficulty = guided_actions_for_type(rec.recommendation_type)
         opportunities.append(
-            TopOpportunity(
+            (
+                recommendation_sort_key(rec, max_savings),
+                TopOpportunity(
                 recommendation_id=rec.id,
                 resource_id=rec.resource_id,
                 resource_type=rec.resource_type,
@@ -2398,17 +2843,25 @@ def get_top_opportunities(
                     round_currency(rec.estimated_savings) if rec.estimated_savings is not None else None
                 ),
                 risk_level=rec.risk_level,
-                confidence_score=rec.confidence_score,
+                impact_score=scoring.impact_score,
+                effort_score=scoring.effort_score,
+                confidence_score=scoring.confidence_score,
+                actionability_type=scoring.actionability_type,
                 computed_score=total_score,
                 normalized_savings=factors["normalized_savings"],
                 risk_factor=factors["risk_factor"],
                 confidence_factor=factors["confidence_factor"],
                 urgency_factor=factors["urgency_factor"],
                 ranking_reason=ranking_reason_for(rec, factors),
-                priority_bucket=priority_bucket_for(total_score),
+                priority_bucket=priority_bucket_for(rec),
+                priority_group=priority_group_for(rec),
                 savings_basis=effective_savings_basis(rec),
                 confidence_reason=effective_confidence_reason(rec),
+                confidence_reasoning=scoring.confidence_reasoning,
                 why_it_matters=why_it_matters_for(ranks.get(rec.id), rec.recommendation_category),
+                why_this_matters=scoring.why_this_matters,
+                expected_impact=scoring.expected_impact,
+                effort_explanation=scoring.effort_explanation,
                 learned_confidence=learned["learned_confidence"],
                 learned_confidence_reason=learned["learned_confidence_reason"],
                 historical_success_rate=learned["historical_success_rate"],
@@ -2416,11 +2869,12 @@ def get_top_opportunities(
                 steps=steps,
                 estimated_time=estimated_time,
                 difficulty=difficulty,
+                ),
             )
         )
 
-    opportunities.sort(key=lambda x: x.computed_score, reverse=True)
-    return opportunities[:limit]
+    opportunities.sort(key=lambda item: item[0])
+    return [item for _key, item in opportunities[:limit]]
 
 
 def list_recommendation_reads(
@@ -2428,6 +2882,7 @@ def list_recommendation_reads(
     tenant_id: UUID,
     cloud_account_id: UUID,
     latest_only: bool = True,
+    state_view: str = "active",
 ) -> list[RecommendationRead]:
     """List recommendations with rank-derived ``why_it_matters`` for API responses."""
     recs = list_recommendations(
@@ -2435,6 +2890,7 @@ def list_recommendation_reads(
         tenant_id=tenant_id,
         cloud_account_id=cloud_account_id,
         latest_only=latest_only,
+        state_view=state_view,
     )
     ranks = rank_by_computed_score(recs)
     stats_by_type = recommendation_intelligence_service.get_recommendation_type_stats(
@@ -2584,9 +3040,10 @@ def get_action_plan(
     max_savings = max(savings_values) if savings_values else 0.0
     risk_rank = {"low": 0, "medium": 1, "high": 2}
 
-    rows: list[tuple[Recommendation, float, float, int, str, str]] = []
+    rows: list[tuple[Recommendation, tuple, float, int, str, str]] = []
     for rec in candidates:
-        score = computed_impact_score(rec, max_savings)
+        sort_key = recommendation_sort_key(rec, max_savings)
+        scoring = resolved_scoring_profile(rec)
         savings = round_currency(rec.estimated_savings) if rec.estimated_savings is not None else 0.0
         rr = risk_rank.get((rec.risk_level or "").lower(), 1)
         factors = decision_factors_for(rec, max_savings)
@@ -2599,22 +3056,19 @@ def get_action_plan(
             recommended_action=rec.recommended_action,
             evidence_json=(findings_by_id.get(rec.finding_id).evidence_json if findings_by_id.get(rec.finding_id) else None),
         )
-        expected_impact = (
-            f"Potential savings around ${savings:,.2f}/month with {rec.risk_level} implementation risk."
-            if rec.estimated_savings is not None
-            else f"Risk reduction with {rec.risk_level} implementation risk and no direct savings estimate."
-        )
+        expected_impact = scoring.expected_impact
         # Keep reason concise (1-2 sentences)
         concise_reason = (ai or reason).split(". ")
         concise_reason = ". ".join(concise_reason[:2]).strip()
         if concise_reason and not concise_reason.endswith("."):
             concise_reason += "."
-        rows.append((rec, score, savings, rr, concise_reason or reason, expected_impact))
+        rows.append((rec, sort_key, savings, rr, concise_reason or reason, expected_impact))
 
-    rows.sort(key=lambda x: (-x[1], -x[2], x[3]))
+    rows.sort(key=lambda x: (x[1], -x[2], x[3]))
     top = rows[:cap]
     items: list[dict] = []
-    for idx, (rec, _score, _savings, _rr, reason, impact) in enumerate(top, start=1):
+    for idx, (rec, _sort_key, _savings, _rr, reason, impact) in enumerate(top, start=1):
+        scoring = resolved_scoring_profile(rec)
         items.append(
             {
                 "step_number": idx,
@@ -2627,6 +3081,11 @@ def get_action_plan(
                     round_currency(rec.estimated_savings) if rec.estimated_savings is not None else None
                 ),
                 "risk_level": rec.risk_level,
+                "impact_score": scoring.impact_score,
+                "effort_score": scoring.effort_score,
+                "confidence_score": scoring.confidence_score,
+                "actionability_type": scoring.actionability_type,
+                "priority_group": priority_group_for(rec),
                 "reason": reason,
                 "expected_impact": impact,
             }

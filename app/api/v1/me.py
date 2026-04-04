@@ -14,6 +14,7 @@ from app.schemas.me import (
     CurrentOrganizationUpdate,
     MeRead,
     TenantSummary,
+    UserPreferencesPatch,
 )
 from app.services import (
     access_resolution_service,
@@ -121,6 +122,17 @@ def patch_me_context_defaults(
     user_ctx: UserContext = Depends(get_user_context),
 ) -> MeRead:
     return me_service.patch_user_context_defaults(db_session, user_ctx, body)
+
+
+@router.patch("/preferences", response_model=MeRead)
+def patch_me_preferences(
+    body: UserPreferencesPatch,
+    db_session: Session = Depends(get_db),
+    user_ctx: UserContext = Depends(get_user_context),
+) -> MeRead:
+    return me_service.patch_user_preferences(
+        db_session, user_ctx, receive_approval_emails=body.receive_approval_emails
+    )
 
 
 @router.get("/tasks", response_model=AttentionTasksResponse)

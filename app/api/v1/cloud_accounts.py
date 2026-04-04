@@ -24,6 +24,11 @@ from app.schemas.cloud_account import (
     DetectionRunRead,
     FindingRead,
     RecommendationRead,
+    RecommendationSnoozeRequest,
+    RecommendationDismissRequest,
+    RecommendationStateUpdateRead,
+    RecommendationBulkStateRequest,
+    RecommendationBulkStateResultRead,
     RecommendationRunRead,
     ResourceIngestionRead,
     TopCostServiceRead,
@@ -127,6 +132,8 @@ def _min_access_for_cloud_route(request: Request) -> str | None:
     if method == "POST" and ("/ingest/" in path or "/detect/" in path or "/recommend/" in path):
         return "admin"
     if method == "POST" and "/outcomes" in path:
+        return "admin"
+    if path.endswith("/snooze") or path.endswith("/dismiss") or path.endswith("/reactivate"):
         return "admin"
     return "viewer"
 
@@ -948,6 +955,7 @@ def list_recommendations_endpoint(
     tenant_id: UUID,
     cloud_account_id: UUID,
     latest_only: bool = Query(default=True),
+    state_view: str = Query(default="active"),
     db_session: Session = Depends(get_db),
 ) -> list[RecommendationRead]:
     try:
@@ -956,6 +964,7 @@ def list_recommendations_endpoint(
             tenant_id,
             cloud_account_id,
             latest_only=latest_only,
+            state_view=state_view,
         )
     except ValueError as exc:
         error_msg = str(exc)
@@ -977,6 +986,7 @@ def list_grouped_recommendations_endpoint(
     tenant_id: UUID,
     cloud_account_id: UUID,
     latest_only: bool = Query(default=True),
+    state_view: str = Query(default="active"),
     db_session: Session = Depends(get_db),
 ) -> list[GroupedItemRead]:
     try:
@@ -985,6 +995,7 @@ def list_grouped_recommendations_endpoint(
             tenant_id,
             cloud_account_id,
             latest_only=latest_only,
+            state_view=state_view,
         )
     except ValueError as exc:
         error_msg = str(exc)
@@ -1001,6 +1012,175 @@ def list_grouped_recommendations_endpoint(
         recommendation_reads=recommendations,
     )
     return [GroupedItemRead.model_validate(item) for item in grouped]
+
+
+@router.post(
+    "/{cloud_account_id}/recommendations/{recommendation_id}/snooze",
+    response_model=RecommendationStateUpdateRead,
+    status_code=status.HTTP_200_OK,
+)
+def snooze_recommendation_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+    body: RecommendationSnoozeRequest,
+    user_ctx: UserContext = Depends(get_user_context),
+    db_session: Session = Depends(get_db),
+) -> RecommendationStateUpdateRead:
+    try:
+        rec = recommendation_service.snooze_recommendation(
+            db_session=db_session,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            recommendation_id=recommendation_id,
+            actor=user_ctx.email,
+            days=body.days,
+            snoozed_until=body.snoozed_until,
+        )
+    except ValueError as exc:
+        error_msg = str(exc)
+        if error_msg == "tenant_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found") from exc
+        if error_msg == "cloud_account_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
+        if error_msg == "recommendation_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation not found") from exc
+        raise
+
+    return RecommendationStateUpdateRead(
+        recommendation_id=rec.id,
+        state=rec.state,
+        snoozed_until=rec.snoozed_until,
+        dismissed_reason=rec.dismissed_reason,
+        dismissed_reason_note=rec.dismissed_reason_note,
+        dismissed_at=rec.dismissed_at,
+        resolved_at=rec.resolved_at,
+        resolution_source=rec.resolution_source,
+    )
+
+
+@router.post(
+    "/{cloud_account_id}/recommendations/{recommendation_id}/dismiss",
+    response_model=RecommendationStateUpdateRead,
+    status_code=status.HTTP_200_OK,
+)
+def dismiss_recommendation_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+    body: RecommendationDismissRequest,
+    user_ctx: UserContext = Depends(get_user_context),
+    db_session: Session = Depends(get_db),
+) -> RecommendationStateUpdateRead:
+    try:
+        rec = recommendation_service.dismiss_recommendation(
+            db_session=db_session,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            recommendation_id=recommendation_id,
+            actor=user_ctx.email,
+            reason=body.reason,
+            note=body.note,
+        )
+    except ValueError as exc:
+        error_msg = str(exc)
+        if error_msg == "tenant_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found") from exc
+        if error_msg == "cloud_account_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
+        if error_msg == "recommendation_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation not found") from exc
+        if error_msg == "invalid_dismiss_reason":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid dismiss reason") from exc
+        raise
+
+    return RecommendationStateUpdateRead(
+        recommendation_id=rec.id,
+        state=rec.state,
+        snoozed_until=rec.snoozed_until,
+        dismissed_reason=rec.dismissed_reason,
+        dismissed_reason_note=rec.dismissed_reason_note,
+        dismissed_at=rec.dismissed_at,
+        resolved_at=rec.resolved_at,
+        resolution_source=rec.resolution_source,
+    )
+
+
+@router.post(
+    "/{cloud_account_id}/recommendations/{recommendation_id}/reactivate",
+    response_model=RecommendationStateUpdateRead,
+    status_code=status.HTTP_200_OK,
+)
+def reactivate_recommendation_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    recommendation_id: UUID,
+    db_session: Session = Depends(get_db),
+) -> RecommendationStateUpdateRead:
+    try:
+        rec = recommendation_service.reactivate_recommendation(
+            db_session=db_session,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            recommendation_id=recommendation_id,
+        )
+    except ValueError as exc:
+        error_msg = str(exc)
+        if error_msg == "tenant_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found") from exc
+        if error_msg == "cloud_account_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
+        if error_msg == "recommendation_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recommendation not found") from exc
+        raise
+
+    return RecommendationStateUpdateRead(
+        recommendation_id=rec.id,
+        state=rec.state,
+        snoozed_until=rec.snoozed_until,
+        dismissed_reason=rec.dismissed_reason,
+        dismissed_reason_note=rec.dismissed_reason_note,
+        dismissed_at=rec.dismissed_at,
+        resolved_at=rec.resolved_at,
+        resolution_source=rec.resolution_source,
+    )
+
+
+@router.post(
+    "/{cloud_account_id}/recommendations/bulk-state",
+    response_model=RecommendationBulkStateResultRead,
+    status_code=status.HTTP_200_OK,
+)
+def bulk_recommendation_state_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    body: RecommendationBulkStateRequest,
+    user_ctx: UserContext = Depends(get_user_context),
+    db_session: Session = Depends(get_db),
+) -> RecommendationBulkStateResultRead:
+    try:
+        result = recommendation_service.bulk_update_recommendation_state(
+            db_session=db_session,
+            tenant_id=tenant_id,
+            cloud_account_id=cloud_account_id,
+            recommendation_ids=body.recommendation_ids,
+            action=body.action,
+            actor=user_ctx.email,
+            days=body.days,
+            snoozed_until=body.snoozed_until,
+            reason=body.reason,
+            note=body.note,
+        )
+    except ValueError as exc:
+        error_msg = str(exc)
+        if error_msg == "tenant_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found") from exc
+        if error_msg == "cloud_account_not_found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
+        if error_msg in {"invalid_bulk_action", "invalid_dismiss_reason"}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg) from exc
+        raise
+    return RecommendationBulkStateResultRead(updated_count=result.updated_count, updated_ids=result.updated_ids)
 
 
 @router.post("/{cloud_account_id}/tagging-batches", response_model=TaggingBatchRead, status_code=status.HTTP_201_CREATED)
@@ -1175,7 +1355,10 @@ def top_opportunities_endpoint(
             risk_level=opp.risk_level,
             confidence_score=opp.confidence_score,
             computed_score=opp.computed_score,
-            normalized_savings=opp.normalized_savings,
+                impact_score=opp.impact_score,
+                effort_score=opp.effort_score,
+                actionability_type=opp.actionability_type,
+                normalized_savings=opp.normalized_savings,
             risk_factor=opp.risk_factor,
             confidence_factor=opp.confidence_factor,
             urgency_factor=opp.urgency_factor,
