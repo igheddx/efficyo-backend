@@ -19,6 +19,8 @@ from app.core.db import SessionLocal
 from app.sync.queue.database import DatabaseTaskQueue
 from app.sync import repository, registry, orchestrator
 from app.sync.queue.base import TaskQueue
+from app.services import ingestion_job_service
+from app.models.ingestion_job import IngestionJob
 
 
 HEARTBEAT_PATH = Path(os.environ.get("MEEZI_WORKER_HEARTBEAT_PATH", "/app/runtime/worker-heartbeat.json"))
@@ -35,6 +37,20 @@ def _write_heartbeat(*, worker_id: str, state: str, task_id: UUID | None = None)
     HEARTBEAT_PATH.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _dequeue_ingestion_job(db: SessionLocal) -> UUID | None:  # type: ignore[valid-type]
+    """Pick the oldest queued IngestionJob and return its id, or None if none pending."""
+    job = (
+        db.query(IngestionJob)
+        .filter(IngestionJob.status == "queued")
+        .order_by(IngestionJob.created_at.asc())
+        .with_for_update(skip_locked=True)
+        .first()
+    )
+    if job is None:
+        return None
+    return job.id
+
+
 def main() -> int:
     worker_id = os.environ.get("SYNC_WORKER_ID") or f"sync-worker-{os.getpid()}"
     queue: TaskQueue = DatabaseTaskQueue()
@@ -46,9 +62,17 @@ def main() -> int:
         try:
             task_id = queue.dequeue_task(db, worker_id=worker_id)
             if task_id is None:
-                _write_heartbeat(worker_id=worker_id, state="idle")
-                db.close()
-                time.sleep(1.5)
+                # No new-pipeline tasks — check for queued legacy IngestionJobs.
+                ingestion_job_id = _dequeue_ingestion_job(db)
+                if ingestion_job_id is not None:
+                    db.close()
+                    _write_heartbeat(worker_id=worker_id, state="processing")
+                    ingestion_job_service.execute_sync_job(ingestion_job_id)
+                    _write_heartbeat(worker_id=worker_id, state="idle")
+                else:
+                    _write_heartbeat(worker_id=worker_id, state="idle")
+                    db.close()
+                    time.sleep(1.5)
                 continue
 
             task = repository.get_task(db, task_id)  # type: ignore[arg-type]

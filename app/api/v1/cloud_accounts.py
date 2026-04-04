@@ -2,7 +2,7 @@ from uuid import UUID, uuid4
 import logging
 from botocore.exceptions import ClientError
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -189,7 +189,6 @@ _AWS_CE_UNAVAILABLE_ERROR_CODES = frozenset({
 def create_cloud_account_endpoint(
     tenant_id: UUID,
     body: CloudAccountCreate,
-    background_tasks: BackgroundTasks,
     db_session: Session = Depends(get_db),
     ctx: UserContext = Depends(get_user_context),
 ) -> CloudAccountProvisionedRead:
@@ -227,7 +226,6 @@ def create_cloud_account_endpoint(
                 cloud_account_id=cloud_account.id,
                 job_type="full_sync",
             )
-            background_tasks.add_task(ingestion_job_service.execute_sync_job, job.id)
             initial_sync_job = IngestionJobRead.model_validate(job)
         except ActiveSyncJobExists as exc:
             initial_sync_job = IngestionJobRead.model_validate(exc.job)
@@ -380,7 +378,6 @@ def reset_cloud_account_ingestion_data_endpoint(
 def create_sync_job_endpoint(
     tenant_id: UUID,
     cloud_account_id: UUID,
-    background_tasks: BackgroundTasks,
     body: IngestionJobCreate | None = None,
     db_session: Session = Depends(get_db),
 ) -> IngestionJobRead:
@@ -408,7 +405,6 @@ def create_sync_job_endpoint(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found") from exc
         raise
 
-    background_tasks.add_task(ingestion_job_service.execute_sync_job, job.id)
     return IngestionJobRead.model_validate(job)
 
 
