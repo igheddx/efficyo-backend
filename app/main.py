@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.api.v1.router import router as api_v1_router
 from app.core.db import SessionLocal
@@ -48,17 +49,39 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Session cookies + optional cross-origin calls from Vite (direct :8000) require credentials.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    """Tell CloudFront (and any other CDN/proxy) never to cache API responses."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app.add_middleware(NoCacheMiddleware)
+
+
+def _cors_origins() -> list[str]:
+    import os
+    base = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:4173",
         "http://127.0.0.1:4173",
         "http://fptnext.local:5173",
         "http://fptnext.local:4173",
-    ],
+    ]
+    extra = os.getenv("FPTNEXT_CORS_ALLOWED_ORIGINS", "")
+    extras = [o.strip() for o in extra.split(",") if o.strip()]
+    return base + extras
+
+
+# Session cookies + optional cross-origin calls from Vite (direct :8000) require credentials.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
