@@ -1,0 +1,54 @@
+# eventbridge.yaml — Detection rules for EventBridge rules.
+
+rules:
+  - rule_id: eventbridge_rule_without_targets
+    enabled: true
+    resource_type: eventbridge_rule
+    finding_type: eventbridge_rule_without_targets
+    recommendation_type: eventbridge_add_targets_or_cleanup
+    category: security
+    severity: medium
+    impact: medium
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "EventBridge rule has no targets"
+    summary_template: "EventBridge rule {resource_id} has no targets attached and cannot trigger any workloads."
+    why_this_matters: "Rules without targets represent either stale infrastructure wasting compute if scheduled, or silent automation failures that go undetected."
+    guided_action_key: eventbridge_add_targets_or_cleanup
+    recommended_action: "Attach intended targets (Lambda, SQS, etc.) or remove the rule if it is no longer needed."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: target_count
+        op: eq
+        value: 0
+    evidence_fields:
+      - target_count
+      - state
+
+  - rule_id: eventbridge_rule_disabled_review
+    enabled: true
+    resource_type: eventbridge_rule
+    finding_type: eventbridge_rule_disabled_review
+    recommendation_type: eventbridge_review_disabled_rule
+    category: governance
+    severity: low
+    impact: low
+    effort: low
+    confidence: high
+    actionability: guided
+    title: "EventBridge rule is disabled"
+    summary_template: "EventBridge rule {resource_id} is in DISABLED state. Confirm whether this is intentional."
+    why_this_matters: "Disabled rules may indicate paused automation, forgotten cleanup debt, or incorrectly silenced scheduled jobs."
+    guided_action_key: eventbridge_review_disabled_rule
+    recommended_action: "Re-enable the rule if it should be active, or document owner and intent before cleanup."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: state
+        op: eq
+        value: DISABLED
+    evidence_fields:
+      - state
+      - target_count

@@ -1,0 +1,169 @@
+# tagging.yaml — Required-tag governance rules for all extended resource types.
+#
+# One rule per resource type.  All rules share the same condition, scoring, and
+# guided-action metadata; only the resource_type / finding_type /
+# recommendation_type / title / summary_template differ.
+#
+# YAML anchors keep the file DRY.
+
+_base: &tagging_base
+  enabled: true
+  category: governance
+  severity: medium
+  impact: low
+  effort: low
+  confidence: high
+  actionability: guided
+  why_this_matters: "Required tags drive ownership, cost allocation, and automation coverage across the platform."
+  recommended_action: "Add Name and Environment tags in AWS for governance and cost allocation."
+  approval_required: false
+  execution_eligible: false
+  conditions:
+    - op: any_tag_missing
+      tags: [Name, Environment]
+  evidence_fields: []
+
+rules:
+  - <<: *tagging_base
+    rule_id: cloudfront_distribution_missing_required_tags
+    resource_type: cloudfront_distribution
+    finding_type: cloudfront_distribution_missing_required_tags
+    recommendation_type: cloudfront_add_required_tags
+    guided_action_key: cloudfront_add_required_tags
+    title: "CloudFront distribution is missing required tags"
+    summary_template: "CloudFront distribution {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: acm_certificate_missing_required_tags
+    resource_type: acm_certificate
+    finding_type: acm_certificate_missing_required_tags
+    recommendation_type: acm_add_required_tags
+    guided_action_key: acm_add_required_tags
+    title: "ACM certificate is missing required tags"
+    summary_template: "ACM certificate {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: apigateway_rest_api_missing_required_tags
+    resource_type: apigateway_rest_api
+    finding_type: apigateway_rest_api_missing_required_tags
+    recommendation_type: apigateway_add_required_tags
+    guided_action_key: apigateway_add_required_tags
+    title: "API Gateway REST API is missing required tags"
+    summary_template: "API Gateway REST API {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: apigateway_http_api_missing_required_tags
+    resource_type: apigateway_http_api
+    finding_type: apigateway_http_api_missing_required_tags
+    recommendation_type: apigateway_http_add_required_tags
+    guided_action_key: apigateway_http_add_required_tags
+    title: "API Gateway HTTP API is missing required tags"
+    summary_template: "API Gateway HTTP API {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: eventbridge_rule_missing_required_tags
+    resource_type: eventbridge_rule
+    finding_type: eventbridge_rule_missing_required_tags
+    recommendation_type: eventbridge_add_required_tags
+    guided_action_key: eventbridge_add_required_tags
+    title: "EventBridge rule is missing required tags"
+    summary_template: "EventBridge rule {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: ses_email_identity_missing_required_tags
+    resource_type: ses_email_identity
+    finding_type: ses_email_identity_missing_required_tags
+    recommendation_type: ses_add_required_tags
+    guided_action_key: ses_add_required_tags
+    title: "SES email identity is missing required tags"
+    summary_template: "SES email identity {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: iot_thing_missing_required_tags
+    resource_type: iot_thing
+    finding_type: iot_thing_missing_required_tags
+    recommendation_type: iot_add_required_tags
+    guided_action_key: iot_add_required_tags
+    title: "IoT thing is missing required tags"
+    summary_template: "IoT thing {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: load_balancer_missing_required_tags
+    resource_type: load_balancer
+    finding_type: load_balancer_missing_required_tags
+    recommendation_type: load_balancer_add_required_tags
+    guided_action_key: load_balancer_add_required_tags
+    title: "Load balancer is missing required tags"
+    summary_template: "Load balancer {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: target_group_missing_required_tags
+    resource_type: target_group
+    finding_type: target_group_missing_required_tags
+    recommendation_type: target_group_add_required_tags
+    guided_action_key: target_group_add_required_tags
+    title: "Target group is missing required tags"
+    summary_template: "Target group {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: route_table_missing_required_tags
+    resource_type: route_table
+    finding_type: route_table_missing_required_tags
+    recommendation_type: route_table_add_required_tags
+    guided_action_key: route_table_add_required_tags
+    title: "Route table is missing required tags"
+    summary_template: "Route table {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: vpc_missing_required_tags
+    resource_type: vpc
+    finding_type: vpc_missing_required_tags
+    recommendation_type: vpc_add_required_tags
+    guided_action_key: vpc_add_required_tags
+    title: "VPC is missing required tags"
+    summary_template: "VPC {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: subnet_missing_required_tags
+    resource_type: subnet
+    finding_type: subnet_missing_required_tags
+    recommendation_type: subnet_add_required_tags
+    guided_action_key: subnet_add_required_tags
+    title: "Subnet is missing required tags"
+    summary_template: "Subnet {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: nat_gateway_missing_required_tags
+    resource_type: nat_gateway
+    finding_type: nat_gateway_missing_required_tags
+    recommendation_type: nat_gateway_add_required_tags
+    guided_action_key: nat_gateway_add_required_tags
+    title: "NAT gateway is missing required tags"
+    summary_template: "NAT gateway {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: internet_gateway_missing_required_tags
+    resource_type: internet_gateway
+    finding_type: internet_gateway_missing_required_tags
+    recommendation_type: internet_gateway_add_required_tags
+    guided_action_key: internet_gateway_add_required_tags
+    title: "Internet gateway is missing required tags"
+    summary_template: "Internet gateway {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: security_group_missing_required_tags
+    resource_type: security_group
+    finding_type: security_group_missing_required_tags
+    recommendation_type: security_group_add_required_tags
+    guided_action_key: security_group_add_required_tags
+    title: "Security group is missing required tags"
+    summary_template: "Security group {resource_id} is missing required governance tags (Name or Environment)."
+
+  - <<: *tagging_base
+    rule_id: rds_parameter_group_missing_required_tags
+    resource_type: rds_parameter_group
+    finding_type: rds_parameter_group_missing_required_tags
+    recommendation_type: rds_parameter_group_add_required_tags
+    guided_action_key: rds_parameter_group_add_required_tags
+    title: "RDS parameter group is missing required tags"
+    summary_template: "RDS parameter group {resource_id} is missing required governance tags (Name or Environment)."

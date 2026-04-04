@@ -193,6 +193,7 @@ def build_me_read(
         is_root_admin=bool(user.is_root_admin),
         can_manage_platform_orgs=bool(user.is_root_admin),
         can_manage_current_organization=can_manage_current,
+        receive_approval_emails=bool(getattr(user, 'receive_approval_emails', False)),
         context_defaults=UserContextDefaultsRead(
             organization_id=user.default_organization_id,
             tenant_id=user.default_tenant_id,
@@ -303,6 +304,19 @@ def list_context_default_cloud_accounts(
     return [
         CloudAccountSummary(id=c.id, name=c.name, account_id=c.account_id or None) for c in rows
     ]
+
+
+def patch_user_preferences(db: Session, ctx: UserContext, *, receive_approval_emails: bool) -> MeRead:
+    if ctx.user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    user = db.query(User).filter(User.id == ctx.user_id).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found.")
+    user.receive_approval_emails = receive_approval_emails
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return build_me_read(db, ctx)
 
 
 def patch_user_context_defaults(db: Session, ctx: UserContext, body: ContextDefaultsPatch) -> MeRead:

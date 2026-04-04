@@ -1,0 +1,83 @@
+# cloudfront.yaml — Detection rules for CloudFront distributions.
+
+rules:
+  - rule_id: cloudfront_insecure_viewer_protocol_policy
+    enabled: true
+    resource_type: cloudfront_distribution
+    finding_type: cloudfront_insecure_viewer_protocol_policy
+    recommendation_type: cloudfront_review_insecure_protocol_policy
+    category: security
+    severity: high
+    impact: high
+    effort: low
+    confidence: high
+    actionability: guided
+    title: "CloudFront distribution allows insecure viewer protocol"
+    summary_template: "Distribution {resource_id} has viewer_protocol_policy set to allow-all, allowing unencrypted HTTP traffic."
+    why_this_matters: "This directly reduces externally exposed risk and addresses a clearly verifiable security posture issue."
+    guided_action_key: cloudfront_review_insecure_protocol_policy
+    recommended_action: "Update default cache behavior viewer protocol policy to redirect HTTP to HTTPS."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: viewer_protocol_policy
+        op: eq
+        value: allow-all
+    evidence_fields:
+      - viewer_protocol_policy
+      - linked_resources
+      - link_confidence
+
+  - rule_id: cloudfront_missing_https_redirect
+    enabled: true
+    resource_type: cloudfront_distribution
+    finding_type: cloudfront_missing_https_redirect
+    recommendation_type: cloudfront_enforce_https_redirect
+    category: security
+    severity: medium
+    impact: high
+    effort: low
+    confidence: high
+    actionability: guided
+    title: "CloudFront distribution does not enforce HTTPS redirect"
+    summary_template: "Distribution {resource_id} is not configured to redirect HTTP traffic to HTTPS."
+    why_this_matters: "This directly reduces externally exposed risk and addresses a clearly verifiable security posture issue."
+    guided_action_key: cloudfront_enforce_https_redirect
+    recommended_action: "Set CloudFront viewer protocol policy to redirect-to-https on active behaviors."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: viewer_protocol_policy
+        op: exists
+      - field: viewer_protocol_policy
+        op: neq
+        value: redirect-to-https
+    evidence_fields:
+      - viewer_protocol_policy
+      - linked_resources
+
+  - rule_id: cloudfront_disabled_distribution_review
+    enabled: true
+    resource_type: cloudfront_distribution
+    finding_type: cloudfront_disabled_distribution_review
+    recommendation_type: cloudfront_review_disabled_distribution
+    category: governance
+    severity: low
+    impact: low
+    effort: low
+    confidence: medium
+    actionability: guided
+    title: "CloudFront distribution is disabled"
+    summary_template: "Distribution {resource_id} is currently disabled. Review whether this is intentional."
+    why_this_matters: "Disabled distributions may represent stale infrastructure or misconfigured origin setup that should be explicitly reviewed."
+    guided_action_key: cloudfront_review_disabled_distribution
+    recommended_action: "Validate ownership and enable only if this distribution is still in service."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: enabled
+        op: bool_false
+    evidence_fields:
+      - enabled
+      - status
+      - linked_resources

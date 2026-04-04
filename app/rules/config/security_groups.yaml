@@ -1,0 +1,56 @@
+# security_groups.yaml — Detection rules for EC2 security groups.
+
+rules:
+  - rule_id: security_group_world_open_sensitive_port
+    enabled: true
+    resource_type: security_group
+    finding_type: security_group_world_open_sensitive_port
+    recommendation_type: security_group_restrict_world_open_ports
+    category: security
+    severity: high
+    impact: high
+    effort: low
+    confidence: high
+    actionability: guided
+    title: "Security group exposes sensitive ports to the internet"
+    summary_template: "Security group {resource_id} has SSH, RDP, or all-ports ingress open to 0.0.0.0/0 or ::/0."
+    why_this_matters: "Wide-open ingress on sensitive ports directly increases attack surface and enables brute-force or lateral movement attempts from the internet."
+    guided_action_key: security_group_restrict_world_open_ports
+    recommended_action: "Replace 0.0.0.0/0 ingress with least-privilege CIDRs; validate connectivity after rule updates."
+    approval_required: true
+    execution_eligible: false
+    conditions:
+      - op: any_bool_true
+        fields: [has_world_open_ssh, has_world_open_rdp, has_world_open_all_ports]
+    evidence_fields:
+      - has_world_open_ssh
+      - has_world_open_rdp
+      - has_world_open_all_ports
+      - ingress_rule_count
+
+  - rule_id: security_group_overly_permissive
+    enabled: true
+    resource_type: security_group
+    finding_type: security_group_overly_permissive
+    recommendation_type: security_group_restrict_ingress
+    category: security
+    severity: medium
+    impact: medium
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "Security group has excessive ingress rules"
+    summary_template: "Security group {resource_id} has 8 or more ingress rules, indicating potential over-permissiveness."
+    why_this_matters: "A high number of ingress rules often signals accumulated permissive grants over time; consolidation reduces misconfiguration risk."
+    guided_action_key: security_group_restrict_ingress
+    recommended_action: "Review all ingress rules, remove stale entries, and consolidate to the minimum required set."
+    approval_required: true
+    execution_eligible: false
+    conditions:
+      - field: ingress_rule_count
+        op: gte
+        value: 8
+      - op: all_bool_false
+        fields: [has_world_open_ssh, has_world_open_rdp, has_world_open_all_ports]
+    evidence_fields:
+      - ingress_rule_count

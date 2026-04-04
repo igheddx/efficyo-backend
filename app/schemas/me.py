@@ -82,6 +82,10 @@ class MeRead(BaseModel):
         default=False,
         description="True when the principal may add/remove members, tenants, and cloud accounts for current_organization.",
     )
+    receive_approval_emails: bool = Field(
+        default=False,
+        description="Whether the user wants email notifications when an approver acts on their submitted approval requests.",
+    )
     context_defaults: UserContextDefaultsRead = Field(
         default_factory=UserContextDefaultsRead,
         description="Saved default MSP org / tenant / AWS account for bootstrap and preferences.",
@@ -100,6 +104,10 @@ class ContextDefaultsPatch(BaseModel):
 
 class CurrentOrganizationUpdate(BaseModel):
     organization_id: UUID
+
+
+class UserPreferencesPatch(BaseModel):
+    receive_approval_emails: bool
 
 
 class AttentionTaskItem(BaseModel):

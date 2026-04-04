@@ -1,4 +1,13 @@
-"""Extended governance/security findings for CloudFront, ACM, API Gateway, EventBridge, SES, IoT, Lambda, and VPC networking."""
+"""Extended governance/security findings for CloudFront, ACM, API Gateway, EventBridge, SES, IoT, Lambda, and VPC networking.
+
+Backward-compatibility note
+---------------------------
+Finding types that have been migrated to the config-driven rule engine
+(app/rules/) are filtered out at the bottom of ``detect_extended_findings``
+before being written to the database.  The rule engine is called separately in
+``app/analyzers/bundle.py`` and emits those findings instead.  This prevents
+duplicate findings while the codebase transitions incrementally.
+"""
 
 from __future__ import annotations
 
@@ -1170,6 +1179,19 @@ def detect_extended_findings(
                     sync_run_id=sync_run_id,
                 )
             )
+
+    # ------------------------------------------------------------------
+    # Backward-compatibility filter: drop any findings whose type has been
+    # migrated to the config-driven rule engine.  The rule engine is invoked
+    # separately and will emit those findings instead, preventing duplicates.
+    # ------------------------------------------------------------------
+    try:
+        from app.rules import get_migrated_finding_types  # lazy import avoids circular dep
+        _migrated = get_migrated_finding_types()
+        if _migrated:
+            findings = [f for f in findings if f.finding_type not in _migrated]
+    except Exception:
+        pass  # If the rules module fails to load, fall through with all findings intact
 
     if findings:
         db_session.add_all(findings)

@@ -16,7 +16,7 @@ _FIXED_CE_TODAY = date(2026, 3, 25)
 
 
 def _patch_ce_today(monkeypatch):
-    monkeypatch.setattr("app.core.cost_window.utc_today", lambda: _FIXED_CE_TODAY)
+    monkeypatch.setattr("app.services.trend_service.utc_today", lambda: _FIXED_CE_TODAY)
 
 
 def _fake_daily_rows_ec2_spike():
@@ -50,9 +50,17 @@ def test_detect_cost_trends_week_over_week_increasing(db, monkeypatch):
     db.commit()
 
     monkeypatch.setattr(
-        cost_explorer_service,
-        "fetch_daily_unblended_cost_by_service_last_14_days",
-        lambda role_arn: _fake_daily_rows_ec2_spike(),
+        "app.cost.query_service.get_wow_trends",
+        lambda _db, _tenant_id, _cloud_id: [
+            {
+                "service": "EC2 - Other",
+                "previous_cost": 100.0,
+                "current_cost": 120.0,
+                "percent_change": 20.0,
+                "trend": "increasing",
+                "summary": "EC2 - Other cost increased by 20% over the last week",
+            }
+        ],
     )
 
     rows = trend_service.detect_cost_trends(db, tenant.id, cloud.id)
@@ -69,7 +77,7 @@ def test_fetch_daily_merges_pagination(monkeypatch):
     monkeypatch.setattr(
         cost_explorer_service.aws_assume_role_service,
         "assume_role",
-        lambda role_arn, region, session_name: {
+        lambda role_arn, region, session_name, **kwargs: {
             "AccessKeyId": "key",
             "SecretAccessKey": "secret",
             "SessionToken": "token",
@@ -142,12 +150,13 @@ def test_cost_trends_over_time_returns_daily_totals(db, monkeypatch):
     db.commit()
 
     monkeypatch.setattr(
-        cost_explorer_service,
-        "fetch_daily_unblended_cost_by_service",
-        lambda role_arn, days=30: [
-            {"date": "2026-03-20", "by_service": {"A": Decimal("1.25"), "B": Decimal("2.75")}},
-            {"date": "2026-03-21", "by_service": {"A": Decimal("3.00")}},
-        ],
+        "app.cost.query_service.get_cost_trends",
+        lambda _db, _tenant_id, _cloud_id: {
+            "points": [
+                {"date": "2026-03-20", "total_cost": 4.0},
+                {"date": "2026-03-21", "total_cost": 3.0},
+            ]
+        },
     )
 
     series = trend_service.cost_trends_over_time(db, tenant.id, cloud.id, days=30)

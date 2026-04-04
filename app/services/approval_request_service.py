@@ -23,6 +23,7 @@ from app.models.tenant import Tenant
 from app.models.user import User
 from app.services import recommendation_outcome_service
 from app.services import tag_values_service
+from app.services import notification_service
 from app.services.execution_policy_service import resolve_execution_policy
 from app.services.recommendation_type_utils import is_add_required_tags_recommendation
 
@@ -195,6 +196,7 @@ def request_to_read(req: ApprovalRequest, *, include_assignments: bool = False) 
         "submitted_at": req.submitted_at,
         "approved_at": req.approved_at,
         "rejected_at": req.rejected_at,
+        "executed_at": req.executed_at if hasattr(req, "executed_at") else None,
         "created_at": req.created_at,
         "updated_at": req.updated_at,
         "approvals_complete": done,
@@ -442,6 +444,7 @@ def list_approval_requests(
             .filter(
                 ApprovalAssignment.approver_user_id == user_id,
                 ApprovalAssignment.status == "pending",
+                ApprovalRequest.status.in_(list(OPEN_STATUSES)),
             )
             .distinct()
         )
@@ -498,6 +501,114 @@ def user_may_view_request(db: Session, req: ApprovalRequest, user_id: UUID | Non
         .first()
         is not None
     )
+
+
+def _notify_decision(
+    db: Session,
+    *,
+    req: ApprovalRequest,
+    approver_name: str,
+    decision: str,
+    comment: str | None,
+) -> None:
+    """Fire an in-app notification and optionally an email to the submitter. Best-effort."""
+    try:
+        rec_summary = recommendation_summary_for_request(db, req) or str(req.recommendation_id)[:8]
+        notification_service.notify_approver_decision(
+            db,
+            approval_request_id=req.id,
+            organization_id=req.organization_id,
+            recommendation_id=req.recommendation_id,
+            recommendation_summary_text=rec_summary,
+            submitter_email=req.submitted_by,
+            approver_name=approver_name,
+            decision=decision,
+            comment=comment,
+        )
+    except Exception:
+        logger.debug("approver decision notification skipped", exc_info=True)
+
+    # Email notification (only when submitter has opted in)
+    try:
+        if req.submitted_by:
+            submitter = (
+                db.query(User)
+                .filter(User.email == req.submitted_by)
+                .first()
+            )
+            if submitter and getattr(submitter, "receive_approval_emails", False):
+                from app.services import invite_email_service
+                from app.core.db import utc_now as _utc_now
+                from datetime import timezone
+
+                acted_iso = _utc_now().replace(tzinfo=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                rec_summary_email = recommendation_summary_for_request(db, req) or str(req.recommendation_id)[:8]
+                invite_email_service.send_approval_decision_email(
+                    recipient_email=submitter.email,
+                    recipient_name=submitter.display_name or submitter.email,
+                    approver_name=approver_name,
+                    decision=decision,
+                    acted_at_iso=acted_iso,
+                    recommendation_summary=rec_summary_email,
+                    comment=comment,
+                )
+    except Exception:
+        logger.debug("approver decision email skipped", exc_info=True)
+
+
+def _notify_co_approvers_cancelled(
+    db: Session,
+    *,
+    req: ApprovalRequest,
+    rejecter_name: str,
+    excluding_user_id: UUID,
+) -> None:
+    """Notify all remaining pending co-approvers that the request was rejected and no action is needed. Best-effort."""
+    try:
+        from app.core.db import utc_now as _utc_now
+        from datetime import timezone
+
+        rec_summary = recommendation_summary_for_request(db, req) or str(req.recommendation_id)[:8]
+        acted_iso = _utc_now().replace(tzinfo=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        pending_others = [
+            assignment
+            for assignment in (req.assignments or [])
+            if assignment.approver_user_id != excluding_user_id and assignment.status == "pending"
+        ]
+
+        for assignment in pending_others:
+            try:
+                # In-app notification
+                notification_service.notify_co_approver_cancellation(
+                    db,
+                    approval_request_id=req.id,
+                    organization_id=req.organization_id,
+                    recommendation_id=req.recommendation_id,
+                    recommendation_summary_text=rec_summary,
+                    co_approver_user_id=assignment.approver_user_id,
+                    rejecter_name=rejecter_name,
+                )
+            except Exception:
+                logger.debug("co-approver cancellation notification skipped", exc_info=True)
+
+            try:
+                # Email if co-approver has opted in
+                co_approver = db.query(User).filter(User.id == assignment.approver_user_id).first()
+                if co_approver and getattr(co_approver, "receive_approval_emails", False):
+                    from app.services import invite_email_service
+
+                    invite_email_service.send_co_approver_cancellation_email(
+                        recipient_email=co_approver.email,
+                        recipient_name=co_approver.display_name or co_approver.email,
+                        rejecter_name=rejecter_name,
+                        acted_at_iso=acted_iso,
+                        recommendation_summary=rec_summary,
+                    )
+            except Exception:
+                logger.debug("co-approver cancellation email skipped", exc_info=True)
+    except Exception:
+        logger.debug("co-approver cancellation notifications skipped", exc_info=True)
 
 
 def approve_assignment(
@@ -592,6 +703,9 @@ def approve_assignment(
         req.updated_at = now
         db.add(req)
 
+    # Notify submitter that this approver has approved
+    _notify_decision(db, req=req, approver_name=a.approver_name_snapshot, decision="approved", comment=comment)
+
     db.commit()
     db.refresh(req)
     return req
@@ -639,7 +753,9 @@ def reject_assignment(
     if a.status != "pending":
         raise ValueError("assignment_already_acted")
 
-    reason = (comment or "").strip() or "Rejected by approver."
+    reason = (comment or "").strip()
+    if not reason:
+        raise ValueError("reject_comment_required")
 
     now = utc_now()
     a.status = "rejected"
@@ -677,6 +793,72 @@ def reject_assignment(
     except Exception:
         logger.debug("bulk tagging reject hook skipped", exc_info=True)
 
+    # Notify submitter that this approver has rejected
+    _notify_decision(db, req=req, approver_name=a.approver_name_snapshot, decision="rejected", comment=reason)
+
+    # Notify remaining pending co-approvers that the request is cancelled — no action needed
+    _notify_co_approvers_cancelled(db, req=req, rejecter_name=a.approver_name_snapshot, excluding_user_id=actor_user_id)
+
+    db.commit()
+    db.refresh(req)
+    return req
+
+
+def execute_approval_request(
+    db: Session,
+    *,
+    request_id: UUID,
+    organization_id: UUID,
+    actor_email: str | None,
+    actor_role: str | None,
+) -> ApprovalRequest:
+    """Execute a fully-approved request. For tagging: apply tags via bulk_tagging_service.
+    For non-tagging: mark the recommendation applied. Sets status='executed', executed_at=now."""
+    from app.services import bulk_tagging_service
+    from app.services import recommendation_outcome_service as outcome_svc
+
+    req = get_approval_request(db, request_id=request_id, organization_id=organization_id)
+    if req is None:
+        raise ValueError("approval_request_not_found")
+    if req.status != "approved":
+        raise ValueError("approval_request_not_ready")
+
+    now = utc_now()
+
+    # Try tagging batch path first
+    batch_executed = False
+    try:
+        bulk_tagging_service.execute_batch_for_approval_request(
+            db,
+            approval_request_id=req.id,
+            actor_email=actor_email,
+            actor_role=actor_role,
+        )
+        batch_executed = True
+    except ValueError as exc:
+        if str(exc) != "no_tagging_batch":
+            raise
+
+    if not batch_executed:
+        # Non-tagging: mark the recommendation applied
+        try:
+            outcome_svc.mark_recommendation_applied(
+                db_session=db,
+                tenant_id=req.tenant_id,
+                cloud_account_id=req.cloud_account_id,
+                recommendation_id=req.recommendation_id,
+                applied_by=actor_email,
+                applied_role=actor_role,
+                execution_notes=None,
+            )
+        except ValueError as exc:
+            if str(exc) not in {"recommendation_not_found", "outcome_not_found"}:
+                raise
+
+    req.status = "executed"
+    req.executed_at = now
+    req.updated_at = now
+    db.add(req)
     db.commit()
     db.refresh(req)
     return req

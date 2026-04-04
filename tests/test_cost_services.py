@@ -36,7 +36,7 @@ def test_fetch_cost_summary_aggregates_rounds_sorts_and_uses_rolling_window(monk
     monkeypatch.setattr(
         cost_explorer_service.aws_assume_role_service,
         "assume_role",
-        lambda role_arn, region, session_name: {
+        lambda role_arn, region, session_name, **kwargs: {
             "AccessKeyId": "key",
             "SecretAccessKey": "secret",
             "SessionToken": "token",
@@ -112,7 +112,7 @@ def test_fetch_cost_summary_handles_empty_results(monkeypatch):
     monkeypatch.setattr(
         cost_explorer_service.aws_assume_role_service,
         "assume_role",
-        lambda role_arn, region, session_name: {
+        lambda role_arn, region, session_name, **kwargs: {
             "AccessKeyId": "key",
             "SecretAccessKey": "secret",
             "SessionToken": "token",
@@ -138,7 +138,7 @@ def test_fetch_cost_summary_paginates_and_merges_pages(monkeypatch):
     monkeypatch.setattr(
         cost_explorer_service.aws_assume_role_service,
         "assume_role",
-        lambda role_arn, region, session_name: {
+        lambda role_arn, region, session_name, **kwargs: {
             "AccessKeyId": "key",
             "SecretAccessKey": "secret",
             "SessionToken": "token",
@@ -196,7 +196,7 @@ def test_fetch_ec2_other_breakdown_groups_usage_types_into_expected_categories(m
     monkeypatch.setattr(
         cost_explorer_service.aws_assume_role_service,
         "assume_role",
-        lambda role_arn, region, session_name: {
+        lambda role_arn, region, session_name, **kwargs: {
             "AccessKeyId": "key",
             "SecretAccessKey": "secret",
             "SessionToken": "token",
@@ -262,7 +262,7 @@ def test_fetch_ec2_other_breakdown_handles_empty_results(monkeypatch):
     monkeypatch.setattr(
         cost_explorer_service.aws_assume_role_service,
         "assume_role",
-        lambda role_arn, region, session_name: {
+        lambda role_arn, region, session_name, **kwargs: {
             "AccessKeyId": "key",
             "SecretAccessKey": "secret",
             "SessionToken": "token",
@@ -300,22 +300,19 @@ def test_get_cost_summary_returns_service_data_for_scoped_account(db, monkeypatc
     db.commit()
     db.refresh(cloud_account)
 
-    observed = {"role_arn": None}
-
-    def _fake_fetch(role_arn):
-        observed["role_arn"] = role_arn
+    def _fake_get_summary(_db, **_kwargs):
         return {
             "start_date": "2026-02-23",
             "end_date": "2026-03-25",
             "total_cost": 12.34,
             "by_service": [{"service": "AWS Lambda", "amount": 12.34}],
+            **account_cost_window_fields(),
         }
 
-    monkeypatch.setattr(cost_summary_service.cost_explorer_service, "fetch_cost_summary", _fake_fetch)
+    monkeypatch.setattr(cost_summary_service.cost_query_service, "get_summary", _fake_get_summary)
 
     result = cost_summary_service.get_cost_summary(db, tenant.id, cloud_account.id)
 
-    assert observed["role_arn"] == "arn:aws:iam::123456789012:role/OptimizationRole"
     assert result["total_cost"] == 12.34
     assert result["by_service"][0]["service"] == "AWS Lambda"
     assert result["cost_window"] == account_cost_window_fields()["cost_window"]

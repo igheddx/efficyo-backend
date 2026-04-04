@@ -129,16 +129,29 @@ def generate_insight_summary(
     end_d = (summary.cost_period_end or "").strip()
     window = f"{start_d} through {end_d}" if start_d and end_d else "the last ~30 days in Cost Explorer"
 
-    cost_overview = (
-        f"{summary.cost_window_label}: AWS spend in Cost Explorer ({summary.cost_metric}) for {window} was {_money(float(summary.total_cost))}. "
-        f"You identified approximately {_money(float(summary.total_estimated_monthly_savings))} in potential monthly savings "
-        f"(~{_clamp_pct(float(summary.savings_percentage)):.1f}%)."
+    cost_data_available = not summary.is_snapshot_missing and (
+        float(summary.total_cost) > 0
+        or len(summary.top_cost_services) > 0
+        or len(trends) > 0
     )
 
-    cost_basis_note = (
-        f"Cost Explorer uses {summary.cost_window_label.lower()} and {summary.cost_metric}; the end date is exclusive in AWS. "
-        "That total often differs slightly from your invoice (tax, credits, RI/SP amortization, or calendar billing periods)."
-    )
+    if cost_data_available:
+        cost_overview = (
+            f"{summary.cost_window_label}: AWS spend in Cost Explorer ({summary.cost_metric}) for {window} was {_money(float(summary.total_cost))}. "
+            f"You identified approximately {_money(float(summary.total_estimated_monthly_savings))} in potential monthly savings "
+            f"(~{_clamp_pct(float(summary.savings_percentage)):.1f}%)."
+        )
+        cost_basis_note = (
+            f"Cost Explorer uses {summary.cost_window_label.lower()} and {summary.cost_metric}; the end date is exclusive in AWS. "
+            "That total often differs slightly from your invoice (tax, credits, RI/SP amortization, or calendar billing periods)."
+        )
+    else:
+        cost_overview = (
+            f"{summary.cost_window_label}: usable Cost Explorer spend data is not available yet for {window}. "
+            f"You identified approximately {_money(float(summary.total_estimated_monthly_savings))} in potential monthly savings. "
+            "Savings percentage will appear once cost data is available."
+        )
+        cost_basis_note = "Cost Explorer data has not been ingested for this account yet, so spend totals and service cost drivers are unavailable."
 
     drivers = summary.top_cost_services[:2]
     if len(drivers) >= 2:
@@ -148,7 +161,11 @@ def generate_insight_summary(
     else:
         cost_drivers = "Top cost drivers will appear once Cost Explorer data is available."
 
-    trend_sentence = _choose_trend_sentences(trends)
+    trend_sentence = (
+        _choose_trend_sentences(trends)
+        if cost_data_available
+        else "Service-level cost trends will appear once Cost Explorer data is available."
+    )
     outcome_sentence = _outcome_sentence(outcomes_data)
 
     if summary.top_savings_opportunity is not None:

@@ -1,0 +1,89 @@
+# acm.yaml — Detection rules for ACM certificates.
+
+rules:
+  - rule_id: acm_certificate_expiring_soon
+    enabled: true
+    resource_type: acm_certificate
+    finding_type: acm_certificate_expiring_soon
+    recommendation_type: acm_review_certificate_expiry
+    category: security
+    severity: high
+    impact: high
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "ACM certificate is expiring within 30 days"
+    summary_template: "Certificate {resource_id} expires within 30 days. Renew or re-validate before the deadline."
+    why_this_matters: "An expired certificate will immediately cause TLS failures for dependent CloudFront distributions, ALBs, or API Gateway endpoints."
+    guided_action_key: acm_review_certificate_expiry
+    recommended_action: "Complete DNS validation or re-import; update dependent distributions and endpoints."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: not_after
+        op: exists
+      - field: not_after
+        op: days_until_lte
+        value: 30
+      - field: not_after
+        op: days_until_gt
+        value: 0
+    evidence_fields:
+      - not_after
+      - linked_resources
+    evidence_computed:
+      - key: days_remaining
+        op: days_until
+        source_field: not_after
+
+  - rule_id: acm_certificate_pending_validation
+    enabled: true
+    resource_type: acm_certificate
+    finding_type: acm_certificate_pending_validation
+    recommendation_type: acm_complete_validation
+    category: security
+    severity: medium
+    impact: high
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "ACM certificate is pending validation"
+    summary_template: "Certificate {resource_id} has PENDING_VALIDATION status and cannot be used until validated."
+    why_this_matters: "Unvalidated certificates block HTTPS activation on dependent services and can delay deployments or cause outages."
+    guided_action_key: acm_complete_validation
+    recommended_action: "Create or verify DNS/email validation records so the certificate reaches ISSUED status."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: status
+        op: eq
+        value: PENDING_VALIDATION
+    evidence_fields:
+      - status
+      - linked_resources
+
+  - rule_id: acm_certificate_validation_issue
+    enabled: true
+    resource_type: acm_certificate
+    finding_type: acm_certificate_validation_issue
+    recommendation_type: acm_investigate_validation_failure
+    category: security
+    severity: high
+    impact: high
+    effort: medium
+    confidence: high
+    actionability: guided
+    title: "ACM certificate has a validation failure or revocation"
+    summary_template: "Certificate {resource_id} is in status {resource_id} — requires investigation and remediation."
+    why_this_matters: "Failed or revoked certificates will break TLS for any dependent services still referencing the ARN."
+    guided_action_key: acm_investigate_validation_failure
+    recommended_action: "Inspect ACM status details, re-request or re-import the certificate, and update dependent services."
+    approval_required: false
+    execution_eligible: false
+    conditions:
+      - field: status
+        op: in
+        values: [FAILED, VALIDATION_TIMED_OUT, REVOKED]
+    evidence_fields:
+      - status
+      - linked_resources

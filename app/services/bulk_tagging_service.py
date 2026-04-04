@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from uuid import UUID
 
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from sqlalchemy.orm import Session
 
 from app.core.db import utc_now
 from app.models.approval_request import ApprovalRequest
+from app.models.cloud_account import CloudAccount
 from app.models.execution_owner import ExecutionOwnerAssignment
 from app.models.finding import Finding
 from app.models.recommendation import Recommendation
 from app.models.recommendation_outcome import RecommendationOutcome
 from app.models.tagging_batch import TaggingBatch, TaggingBatchResource
-from app.services import approval_request_service, recommendation_outcome_service
+from app.services import approval_request_service, aws_assume_role_service, recommendation_outcome_service
+from app.services.recommendation_scoring import priority_group_for
 from app.services.recommendation_service import guided_actions_for_type
 from app.services.resource_capability_registry import TAG_GOVERNANCE_FINDING_TO_RECOMMENDATION
+
+logger = logging.getLogger(__name__)
 
 
 def grouped_recommendations(
@@ -45,6 +52,11 @@ def grouped_recommendations(
                 "resource_type_breakdown": Counter(),
                 "risk_summary": Counter(),
                 "workflow_summary": Counter(),
+                "impact_summary": Counter(),
+                "effort_summary": Counter(),
+                "confidence_summary": Counter(),
+                "actionability_summary": Counter(),
+                "priority_group_summary": Counter(),
                 "owner_summary": Counter(),
                 "guided_actions": steps,
                 "resources": [],
@@ -54,6 +66,11 @@ def grouped_recommendations(
         bucket["resource_type_breakdown"][rec.resource_type] += 1
         bucket["risk_summary"][rec.risk_level or "unknown"] += 1
         bucket["workflow_summary"][rec.workflow_status or "suggested"] += 1
+        bucket["impact_summary"][rec.impact_score or "medium"] += 1
+        bucket["effort_summary"][rec.effort_score or "medium"] += 1
+        bucket["confidence_summary"][rec.confidence_score or "medium"] += 1
+        bucket["actionability_summary"][rec.actionability_type or "guided"] += 1
+        bucket["priority_group_summary"][rec.priority_group or priority_group_for(rec)] += 1
         owner_id = owner_by_recommendation_id.get(str(rec.id))
         if owner_id is not None:
             bucket["owner_summary"][str(owner_id)] += 1
@@ -81,6 +98,11 @@ def grouped_recommendations(
                 "resource_type_breakdown": dict(row["resource_type_breakdown"]),
                 "risk_summary": dict(row["risk_summary"]),
                 "workflow_summary": dict(row["workflow_summary"]),
+                "impact_summary": dict(row["impact_summary"]),
+                "effort_summary": dict(row["effort_summary"]),
+                "confidence_summary": dict(row["confidence_summary"]),
+                "actionability_summary": dict(row["actionability_summary"]),
+                "priority_group_summary": dict(row["priority_group_summary"]),
                 "owner_summary": {
                     "assigned": int(sum(row["owner_summary"].values())),
                     "unassigned": int(row["total_count"] - sum(row["owner_summary"].values())),
@@ -89,7 +111,13 @@ def grouped_recommendations(
                 "resources": row["resources"],
             }
         )
-    out.sort(key=lambda x: (x["total_count"], x["group_key"]), reverse=True)
+    out.sort(
+        key=lambda x: (
+            -(x.get("impact_summary", {}).get("high", 0)),
+            -(x.get("priority_group_summary", {}).get("quick_win", 0)),
+            x["group_key"],
+        )
+    )
     return out
 
 
@@ -180,6 +208,10 @@ def create_tagging_batch(
             raise ValueError("recommendation_type_mismatch")
 
     representative_recommendation_id = resources[0]["recommendation_id"]
+    # For bulk tagging, satisfy the tag-values-required check by using shared_tag_values if
+    # provided, otherwise fall back to the first resource's proposed_tags (the user has already
+    # filled per-row values which are the actual source of truth for execution).
+    effective_tag_values = shared_tag_values or (resources[0].get("proposed_tags") or {})
     approval_request = approval_request_service.create_approval_request(
         db_session,
         organization_id=organization_id,
@@ -188,7 +220,7 @@ def create_tagging_batch(
         approver_user_ids=approver_user_ids,
         execution_owner_user_id=execution_owner_user_id,
         approval_mode="all_required",
-        tag_values=shared_tag_values,
+        tag_values=effective_tag_values,
         submitted_by=submitted_by,
         submitted_by_role=submitted_by_role,
     )
@@ -357,6 +389,87 @@ def on_approval_request_rejected(db_session: Session, *, approval_request_id: UU
             row.execution_error = reason
 
 
+def _apply_aws_tags_for_row(
+    cloud: CloudAccount,
+    resource_id: str,
+    recommendation_type: str,
+    proposed_tags: dict[str, str],
+) -> str:
+    """Apply tags to the real AWS resource. Returns execution notes. Raises on AWS error."""
+    region = cloud.region_default or "us-east-1"
+    exec_role_arn = cloud.execution_role_arn or cloud.role_arn
+    credentials = aws_assume_role_service.assume_role(
+        role_arn=exec_role_arn,
+        region=region,
+        session_name="fptnext-bulk-tagging-exec",
+        external_id=cloud.external_id,
+    )
+    rtype = (recommendation_type or "").lower()
+
+    if rtype == "s3_add_required_tags":
+        s3 = boto3.client(
+            "s3",
+            region_name=region,
+            aws_access_key_id=credentials["AccessKeyId"],
+            aws_secret_access_key=credentials["SecretAccessKey"],
+            aws_session_token=credentials["SessionToken"],
+        )
+        # Merge existing tags with proposed
+        existing: dict[str, str] = {}
+        try:
+            resp = s3.get_bucket_tagging(Bucket=resource_id)
+            for t in resp.get("TagSet", []) or []:
+                k = t.get("Key")
+                if k:
+                    existing[str(k)] = str(t.get("Value", ""))
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in {"NoSuchTagSet", "NoSuchTagSetError"}:
+                raise
+        merged = {**existing, **proposed_tags}
+        tag_set = [{"Key": k, "Value": v} for k, v in sorted(merged.items())]
+        put_resp = s3.put_bucket_tagging(Bucket=resource_id, Tagging={"TagSet": tag_set})
+        req_id = put_resp.get("ResponseMetadata", {}).get("RequestId", "n/a")
+        return (
+            f"Applied {len(merged)} tags on s3://{resource_id}. "
+            f"Tags: {list(merged.keys())}. RequestId={req_id}."
+        )
+
+    # EC2-family resources: use ec2.create_tags() since resource_id is a short ID (nat-xxx, vpc-xxx, etc.)
+    _EC2_TAG_TYPES = frozenset({
+        "nat_gateway_add_required_tags",
+        "vpc_add_required_tags",
+        "subnet_add_required_tags",
+        "route_table_add_required_tags",
+        "internet_gateway_add_required_tags",
+        "security_group_add_required_tags",
+        "ec2_add_required_tags",
+    })
+    if rtype in _EC2_TAG_TYPES:
+        ec2 = boto3.client(
+            "ec2",
+            region_name=region,
+            aws_access_key_id=credentials["AccessKeyId"],
+            aws_secret_access_key=credentials["SecretAccessKey"],
+            aws_session_token=credentials["SessionToken"],
+        )
+        tags_to_add = [{"Key": k, "Value": str(v)} for k, v in proposed_tags.items()]
+        ec2.create_tags(Resources=[resource_id], Tags=tags_to_add)
+        return f"Applied {len(tags_to_add)} tags on {resource_id} via ec2.create_tags."
+
+    # Generic fallback: use ResourceGroupsTaggingAPI (requires ARN-formatted resource_id)
+    tagging = boto3.client(
+        "resourcegroupstaggingapi",
+        region_name=region,
+        aws_access_key_id=credentials["AccessKeyId"],
+        aws_secret_access_key=credentials["SecretAccessKey"],
+        aws_session_token=credentials["SessionToken"],
+    )
+    tags_to_add = {k: str(v) for k, v in proposed_tags.items()}
+    tagging.tag_resources(ResourceARNList=[resource_id], Tags=tags_to_add)
+    return f"Applied {len(tags_to_add)} tags on {resource_id} via ResourceGroupsTaggingAPI."
+
+
 def execute_batch(
     db_session: Session,
     *,
@@ -383,11 +496,27 @@ def execute_batch(
     batch.status = "in_progress"
     batch.execution_notes = execution_notes if execution_notes is not None else batch.execution_notes
 
+    # Fetch cloud account once for AWS credential use
+    cloud = db_session.query(CloudAccount).filter(CloudAccount.id == cloud_account_id).first()
+    can_apply_aws = cloud is not None and bool(cloud.role_arn)
+
     for row in batch.resources:
         if row.execution_status in {"completed"}:
             continue
         row.execution_status = "in_progress"
         try:
+            aws_notes: str | None = None
+            if can_apply_aws:
+                try:
+                    aws_notes = _apply_aws_tags_for_row(
+                        cloud,
+                        resource_id=row.resource_id,
+                        recommendation_type=batch.recommendation_type,
+                        proposed_tags=dict(row.proposed_tags_json or {}),
+                    )
+                except (ClientError, BotoCoreError) as aws_exc:
+                    raise ValueError(f"AWS tagging failed for {row.resource_id}: {aws_exc}") from aws_exc
+
             outcome = recommendation_outcome_service.create_outcome_for_recommendation(
                 db_session=db_session,
                 tenant_id=tenant_id,
@@ -404,12 +533,13 @@ def execute_batch(
                 recommendation_id=row.recommendation_id,
                 applied_by=actor_email,
                 applied_role=actor_role,
-                execution_notes=execution_notes,
+                execution_notes=aws_notes or execution_notes,
             )
             row.execution_status = "completed"
             row.executed_at = utc_now()
             row.execution_error = None
         except Exception as exc:  # noqa: BLE001
+            logger.error("Batch row execution failed for resource %s: %s", row.resource_id, exc)
             row.execution_status = "failed"
             row.execution_error = str(exc)
 
@@ -436,3 +566,31 @@ def execute_batch(
         "failed": counts.get("failed", 0),
         "blocked": counts.get("blocked", 0),
     }
+
+
+def execute_batch_for_approval_request(
+    db_session: Session,
+    *,
+    approval_request_id: UUID,
+    actor_email: str | None,
+    actor_role: str | None,
+) -> None:
+    """Look up the tagging batch for an approval request and execute it.
+    Raises ValueError('no_tagging_batch') if no batch is linked to this request."""
+    batch = (
+        db_session.query(TaggingBatch)
+        .filter(TaggingBatch.approval_request_id == approval_request_id)
+        .first()
+    )
+    if batch is None:
+        raise ValueError("no_tagging_batch")
+
+    execute_batch(
+        db_session,
+        tenant_id=batch.tenant_id,
+        cloud_account_id=batch.cloud_account_id,
+        batch_id=batch.id,
+        actor_email=actor_email,
+        actor_role=actor_role,
+        execution_notes=None,
+    )

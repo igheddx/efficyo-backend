@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
@@ -8,6 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.core.db import SessionLocal, utc_now
 from app.models.ingestion_job import IngestionJob
+
+# Jobs stuck longer than this are considered orphaned (server crashed mid-run).
+_ORPHAN_THRESHOLD_MINUTES: int = 120
 from app.services import cloud_account_service, detection_service, ingestion_service, recommendation_service, tenant_service
 from app.sync.jobs.cost_sync import CostSyncJobRunner
 from app.sync.jobs.resource_sync import run_resource_sync
@@ -22,6 +26,37 @@ class ActiveSyncJobExists(Exception):
         self.job = job
 
 
+def reap_orphaned_jobs(db_session: Session) -> int:
+    """Mark any jobs stuck in queued/running longer than the orphan threshold as failed.
+
+    Called once at server startup so a crash/restart never blocks future syncs.
+    Returns the number of jobs reaped.
+    """
+    cutoff = utc_now() - timedelta(minutes=_ORPHAN_THRESHOLD_MINUTES)
+    orphans = (
+        db_session.query(IngestionJob)
+        .filter(
+            IngestionJob.status.in_(("queued", "running")),
+            IngestionJob.updated_at < cutoff,
+        )
+        .all()
+    )
+    for job in orphans:
+        job.status = "failed"
+        job.error_message = (
+            f"Job reaped at startup: was stuck in '{job.status}' state for >"
+            f"{_ORPHAN_THRESHOLD_MINUTES} min (likely a server crash)."
+        )
+        job.updated_at = utc_now()
+        logger.warning(
+            "Reaped orphaned sync job",
+            extra={"job_id": str(job.id), "job_type": job.job_type, "prior_status": job.status},
+        )
+    if orphans:
+        db_session.commit()
+    return len(orphans)
+
+
 def _validate_scope(db_session: Session, tenant_id: UUID, cloud_account_id: UUID) -> None:
     cloud_account_service.get_cloud_account_or_raise(db_session, tenant_id, cloud_account_id)
 
@@ -31,9 +66,14 @@ def get_active_sync_job(
     tenant_id: UUID,
     cloud_account_id: UUID,
 ) -> IngestionJob | None:
-    """Return the most recent queued or running job for this scope, if any."""
+    """Return the most recent queued or running job for this scope, if any.
+
+    Any job that has been in an active state longer than the orphan threshold is
+    automatically failed here so it cannot permanently block new syncs.
+    """
     _validate_scope(db_session, tenant_id, cloud_account_id)
-    return (
+    cutoff = utc_now() - timedelta(minutes=_ORPHAN_THRESHOLD_MINUTES)
+    candidate = (
         db_session.query(IngestionJob)
         .filter(
             IngestionJob.tenant_id == tenant_id,
@@ -43,6 +83,19 @@ def get_active_sync_job(
         .order_by(IngestionJob.created_at.desc())
         .first()
     )
+    if candidate is not None and candidate.updated_at < cutoff:
+        logger.warning(
+            "Auto-reaping orphaned sync job on access",
+            extra={"job_id": str(candidate.id), "job_type": candidate.job_type},
+        )
+        candidate.status = "failed"
+        candidate.error_message = (
+            f"Job auto-reaped: stuck in active state for >{_ORPHAN_THRESHOLD_MINUTES} min."
+        )
+        candidate.updated_at = utc_now()
+        db_session.commit()
+        return None
+    return candidate
 
 
 def create_sync_job(
@@ -169,11 +222,8 @@ def _emit_sync_notifications(db_session: Session, job_id: UUID) -> None:
             success=ok,
             error_message=job.error_message if not ok else None,
         )
-        if ok:
-            org_id = notification_service.org_id_for_tenant(db_session, job.tenant_id)
-            if org_id:
-                n = approvals_service.count_pending_approvals_for_organization(db_session, org_id)
-                notification_service.notify_pending_approvals_after_sync(db_session, org_id, n)
+        # Do NOT send approval_required notifications after sync. Unactioned recommendations
+        # are not pending approvals — an approval request must be explicitly submitted first.
     except Exception:
         logger.exception("Failed to emit sync notifications", extra={"job_id": str(job_id)})
         try:

@@ -156,7 +156,7 @@ def test_cost_sync_creates_snapshot_and_usage_log(db, dev_org_scope, monkeypatch
 
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_cost_summary",
-        lambda role_arn: {
+        lambda role_arn, **kwargs: {
             "start_date": (utc_now() - timedelta(days=30)).date().isoformat(),
             "end_date": utc_now().date().isoformat(),
             "total_cost": 50.0,
@@ -166,11 +166,11 @@ def test_cost_sync_creates_snapshot_and_usage_log(db, dev_org_scope, monkeypatch
     )
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_daily_unblended_cost_by_service",
-        lambda role_arn, days: [{"date": utc_now().date().isoformat(), "by_service": {"AmazonEC2": 2.0}}],
+        lambda role_arn, days, **kwargs: [{"date": utc_now().date().isoformat(), "by_service": {"AmazonEC2": 2.0}}],
     )
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_ec2_other_breakdown",
-        lambda role_arn: {"ec2_other_total": 0.0, "breakdown": []},
+        lambda role_arn, **kwargs: {"ec2_other_total": 0.0, "breakdown": []},
     )
 
     snap = cost_snapshot_service.sync_cost_snapshot(
@@ -413,7 +413,7 @@ def test_admin_force_refresh_allowed_when_policy_permits(db, dev_org_scope, monk
     db.commit()
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_cost_summary",
-        lambda role_arn: {
+        lambda role_arn, **kwargs: {
             "start_date": (utc_now() - timedelta(days=30)).date().isoformat(),
             "end_date": utc_now().date().isoformat(),
             "total_cost": 10.0,
@@ -423,11 +423,11 @@ def test_admin_force_refresh_allowed_when_policy_permits(db, dev_org_scope, monk
     )
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_daily_unblended_cost_by_service",
-        lambda role_arn, days: [{"date": utc_now().date().isoformat(), "by_service": {"AmazonEC2": 1.0}}],
+        lambda role_arn, days, **kwargs: [{"date": utc_now().date().isoformat(), "by_service": {"AmazonEC2": 1.0}}],
     )
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_ec2_other_breakdown",
-        lambda role_arn: {"ec2_other_total": 0.0, "breakdown": []},
+        lambda role_arn, **kwargs: {"ec2_other_total": 0.0, "breakdown": []},
     )
     snap = cost_snapshot_service.sync_cost_snapshot(
         db,
@@ -445,7 +445,7 @@ def test_root_force_refresh_allowed(db, dev_org_scope, monkeypatch):
     tenant, account = _seed_scope(db, dev_org_scope)
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_cost_summary",
-        lambda role_arn: {
+        lambda role_arn, **kwargs: {
             "start_date": (utc_now() - timedelta(days=30)).date().isoformat(),
             "end_date": utc_now().date().isoformat(),
             "total_cost": 12.0,
@@ -455,11 +455,11 @@ def test_root_force_refresh_allowed(db, dev_org_scope, monkeypatch):
     )
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_daily_unblended_cost_by_service",
-        lambda role_arn, days: [{"date": utc_now().date().isoformat(), "by_service": {"AmazonEC2": 1.2}}],
+        lambda role_arn, days, **kwargs: [{"date": utc_now().date().isoformat(), "by_service": {"AmazonEC2": 1.2}}],
     )
     monkeypatch.setattr(
         "app.services.cost_explorer_service.fetch_ec2_other_breakdown",
-        lambda role_arn: {"ec2_other_total": 0.0, "breakdown": []},
+        lambda role_arn, **kwargs: {"ec2_other_total": 0.0, "breakdown": []},
     )
     snap = cost_snapshot_service.sync_cost_snapshot(
         db,

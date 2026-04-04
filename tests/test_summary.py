@@ -11,8 +11,8 @@ from app.models.tenant import Tenant
 
 def test_summary_uses_latest_deduped_recommendations_only(client, db, dev_org_scope, monkeypatch):
     monkeypatch.setattr(
-        "app.services.cost_explorer_service.fetch_cost_summary",
-        lambda role_arn: {
+        "app.services.summary_service.query_service.get_summary",
+        lambda _db, **_kwargs: {
             "start_date": "2026-02-23",
             "end_date": "2026-03-25",
             "total_cost": 100.0,
@@ -22,6 +22,9 @@ def test_summary_uses_latest_deduped_recommendations_only(client, db, dev_org_sc
                 {"service": "Amazon Simple Storage Service", "amount": 20.0},
                 {"service": "Amazon EC2", "amount": 10.0},
             ],
+            "cost_window": "rolling_30d",
+            "cost_window_label": "Rolling last 30 days",
+            "cost_metric": "UnblendedCost",
         },
     )
 

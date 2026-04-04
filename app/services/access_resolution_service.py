@@ -320,7 +320,7 @@ def can_submit_multi_approval_for_context(
     if _membership_implies_org_wide_admin(ctx.role):
         return True
     eff = resolve_effective_access(db, ctx, tenant_id, cloud_account_id)
-    return access_rank(eff) >= access_rank("approver")
+    return access_rank(eff) >= access_rank("admin")
 
 
 def user_can_approve_assignment(

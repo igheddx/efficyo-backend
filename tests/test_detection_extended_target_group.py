@@ -6,6 +6,7 @@ from app.models.finding import Finding
 from app.models.organization import Organization
 from app.models.resource_snapshot import ResourceSnapshot
 from app.models.tenant import Tenant
+from app.rules.engine import run_rule_engine
 from app.services import detection_extended_service
 
 
@@ -64,7 +65,9 @@ def test_detect_extended_target_group_depth_findings(db):
     db.commit()
 
     run_id = uuid4()
+    # Target group finding types are now config-driven; run both paths as production does.
     detection_extended_service.detect_extended_findings(db, tenant.id, account.id, run_id)
+    run_rule_engine(db, tenant.id, account.id, run_id)
 
     finding_types = {
         f.finding_type
@@ -127,7 +130,9 @@ def test_detect_extended_network_exposure_chain_findings(db):
     db.commit()
 
     run_id = uuid4()
+    # Target group finding types are now config-driven; run both paths as production does.
     detection_extended_service.detect_extended_findings(db, tenant.id, account.id, run_id)
+    run_rule_engine(db, tenant.id, account.id, run_id)
 
     finding_types = {
         f.finding_type

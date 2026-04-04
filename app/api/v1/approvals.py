@@ -17,6 +17,14 @@ def _require_approver(db_session: Session, ctx: UserContext, org_id) -> None:
         )
 
 
+def _require_admin(db_session: Session, ctx: UserContext, org_id) -> None:
+    if not access_resolution_service.user_may_admin_view_approval_requests(db_session, ctx, org_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required to view the org-wide approval queue.",
+        )
+
+
 @router.get("/pending", response_model=PendingApprovalsPageRead)
 def list_pending_approvals(
     limit: int = Query(50, ge=1, le=200),
@@ -29,7 +37,7 @@ def list_pending_approvals(
     ctx: UserContext = Depends(get_user_context),
 ) -> PendingApprovalsPageRead:
     org_id = tenant_scope_service.require_data_access_organization_id(db_session, ctx)
-    _require_approver(db_session, ctx, org_id)
+    _require_admin(db_session, ctx, org_id)
     return approvals_service.list_pending_approvals_for_organization(
         db_session,
         org_id,

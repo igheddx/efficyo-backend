@@ -1,0 +1,29 @@
+# apigateway.yaml — Detection rules for API Gateway (REST and HTTP APIs).
+
+rules:
+  - rule_id: apigateway_public_exposure_review
+    enabled: true
+    resource_type: apigateway_rest_api
+    finding_type: apigateway_public_exposure_review
+    recommendation_type: apigateway_public_exposure_review
+    category: security
+    severity: medium
+    impact: high
+    effort: medium
+    confidence: medium
+    actionability: review_required
+    title: "API Gateway REST API is publicly exposed"
+    summary_template: "REST API {resource_id} is publicly reachable. Validate authentication, throttling, and downstream integration posture."
+    why_this_matters: "Public APIs are directly accessible from the internet; unvalidated auth or integration exposure can lead to data leaks or unauthorized access."
+    guided_action_key: apigateway_public_exposure_review
+    recommended_action: "Review auth controls, stage settings, and integrated targets for least-privilege access."
+    approval_required: true
+    execution_eligible: false
+    conditions:
+      - field: endpoint_type
+        op: eq
+        value: PUBLIC
+    evidence_fields:
+      - endpoint_type
+      - integration_type
+      - linked_resources

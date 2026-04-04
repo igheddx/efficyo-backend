@@ -380,6 +380,91 @@ def notify_execution_failed(
     )
 
 
+def notify_co_approver_cancellation(
+    db: Session,
+    *,
+    approval_request_id: UUID,
+    organization_id: UUID,
+    recommendation_id: UUID,
+    recommendation_summary_text: str,
+    co_approver_user_id: UUID,
+    rejecter_name: str,
+) -> None:
+    """Notify a pending co-approver (in-app) that the request was rejected by another approver — no action needed."""
+    msg = (
+        f'No action needed: {rejecter_name} rejected the approval request for: '
+        f'{recommendation_summary_text[:300]}. Your pending approval has been cancelled.'
+    )
+    create_notification(
+        db,
+        user_id=co_approver_user_id,
+        organization_id=organization_id,
+        notification_type="approval_request_cancelled",
+        message=msg,
+        entity_type="approval_request",
+        entity_id=approval_request_id,
+        payload={
+            "approval_request_id": str(approval_request_id),
+            "recommendation_id": str(recommendation_id),
+            "rejecter_name": rejecter_name,
+            "view": "approvals",
+        },
+    )
+    try:
+        db.commit()
+    except Exception:
+        logger.exception("Failed to commit co-approver cancellation notification")
+        db.rollback()
+
+
+def notify_approver_decision(
+    db: Session,
+    *,
+    approval_request_id: UUID,
+    organization_id: UUID,
+    recommendation_id: UUID,
+    recommendation_summary_text: str,
+    submitter_email: str | None,
+    approver_name: str,
+    decision: str,
+    comment: str | None,
+) -> None:
+    """Notify the submitter (in-app) that an approver has acted on their request."""
+    if not submitter_email:
+        return
+    submitter_user_id = resolve_notification_user_id(db, None, submitter_email)
+    if submitter_user_id is None:
+        return
+    action_label = "approved" if decision == "approved" else "rejected"
+    comment_part = f' — "{comment[:300]}"' if comment else ""
+    msg = (
+        f'{approver_name} {action_label} your approval request for: '
+        f'{recommendation_summary_text[:300]}{comment_part}'
+    )
+    create_notification(
+        db,
+        user_id=submitter_user_id,
+        organization_id=organization_id,
+        notification_type=f"approval_decision_{decision}",
+        message=msg,
+        entity_type="approval_request",
+        entity_id=approval_request_id,
+        payload={
+            "approval_request_id": str(approval_request_id),
+            "recommendation_id": str(recommendation_id),
+            "approver_name": approver_name,
+            "decision": decision,
+            "comment": comment or None,
+            "view": "approvals",
+        },
+    )
+    try:
+        db.commit()
+    except Exception:
+        logger.exception("Failed to commit approver decision notification")
+        db.rollback()
+
+
 def list_notifications(
     db: Session,
     *,
