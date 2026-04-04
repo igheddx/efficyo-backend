@@ -44,6 +44,6 @@ jobs:
               sh -c "cd /app && alembic upgrade head"
 
             echo "==> Restarting api and worker"
-            sudo docker compose up -d api worker
+            sudo docker compose up -d --remove-orphans api worker
 
             echo "==> Deploy complete"
