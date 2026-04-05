@@ -74,8 +74,8 @@ def test_dedupe_increments_count_and_max_savings():
 
 def test_markdown_sections_and_none():
     text = format_deferral_markdown({}, {})
-    assert "Low Priority Items (Safe to Defer)" in text
+    assert "LOW PRIORITY (Safe to Defer)" in text
     assert "None" in text
-    assert "Deferred But Important" in text
+    assert "DEFERRED BUT IMPORTANT" in text
     assert "Summary" in text
-    assert "Total unique low priority items: 0" in text
+    assert "Low Priority Items: 0" in text

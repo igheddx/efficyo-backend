@@ -158,23 +158,33 @@ def classify_deferral_bucket(rec: Recommendation, ee: dict[str, Any]) -> Literal
 
 
 def _why_low(rec: Recommendation) -> str:
-    return (
-        "Savings are under $10 (or not estimated); risk is not elevated; the change reads as hygiene, "
-        "tagging, metadata, or minor housekeeping rather than urgent security or availability work."
-    )
+    return "Low impact, low risk, negligible savings — safe to defer"
 
 
 def _why_deferred(rec: Recommendation) -> str:
-    parts = ["Not eligible to run yet (gated or blocked)."]
     if _is_security_significant(rec):
-        parts.append("Security or risk posture means it should stay on the radar once unblocked.")
-    elif (_savings_float(rec) or 0) >= _SAVINGS_LOW_THRESHOLD:
-        parts.append("Estimated savings or impact merit follow-up after gates clear.")
-    elif _risk_norm(rec) in ("high", "medium"):
-        parts.append("Elevated risk means it should not be treated as optional cleanup.")
-    else:
-        parts.append("Worth revisiting when execution is ready.")
-    return " ".join(parts)
+        return "Security exposure — keep on radar once unblocked"
+    s = _savings_float(rec)
+    if s is not None and s >= _SAVINGS_LOW_THRESHOLD:
+        return f"Meaningful savings (est. {_format_savings(s)}) — revisit when gates clear"
+    if _risk_norm(rec) in ("high", "medium"):
+        return "Elevated risk — not optional cleanup"
+    return "Blocked — worth revisiting when execution is ready"
+
+
+def _deferred_category(rec: Recommendation) -> str:
+    if _is_security_significant(rec):
+        return "Security"
+    rt = _rtype(rec)
+    cat = (rec.recommendation_category or "").strip().lower()
+    if cat == "cost" or "rightsiz" in rt or "idle" in rt or "unused" in rt or "saving" in rt:
+        return "Cost Optimization"
+    if any(s in rt for s in _HYGIENE_TYPE_SUBSTRINGS) or cat == "governance":
+        return "Governance / Tagging"
+    return "Configuration"
+
+
+_CATEGORY_SORT_ORDER = {"Security": 0, "Cost Optimization": 1, "Governance / Tagging": 2, "Configuration": 3}
 
 
 def _title_key(rec: Recommendation) -> str:
@@ -208,6 +218,7 @@ class _Agg:
     elig_ee: dict[str, Any] = field(default_factory=dict)
     sample_rec: Recommendation | None = None
     bucket: str = ""
+    category: str = ""
 
     def add(self, rec: Recommendation, ee: dict[str, Any], bucket: str) -> None:
         self.count += 1
@@ -220,6 +231,8 @@ class _Agg:
         self.bucket = bucket
         if not self.title_display:
             self.title_display = _title_display(rec)
+        if not self.category:
+            self.category = _deferred_category(rec)
 
 
 def _aggregate(
@@ -242,53 +255,105 @@ def _format_savings(val: float | None) -> str:
     return f"${val:,.2f}"
 
 
+def _rec_type_label(agg: _Agg) -> str:
+    rt = _rtype(agg.sample_rec) if agg.sample_rec else ""
+    if any(s in rt for s in _HYGIENE_TYPE_SUBSTRINGS):
+        return "Governance / Tagging"
+    if any(s in rt for s in _SECURITY_TYPE_SUBSTRINGS):
+        return "Security"
+    return agg.category or "Configuration"
+
+
+_NETWORK_TAG_KEYWORDS = ("subnet", "vpc", "route_table", "internet_gateway", "nat_gateway", "security_group")
+
+
+def _group_similar(groups: dict[str, _Agg]) -> dict[str, _Agg]:
+    """Merge network/tagging items into a combined group for cleaner output."""
+    network_tag: list[_Agg] = []
+    other: dict[str, _Agg] = {}
+    for key, agg in groups.items():
+        rt = _rtype(agg.sample_rec) if agg.sample_rec else ""
+        if any(k in rt for k in _NETWORK_TAG_KEYWORDS) and any(s in rt for s in _HYGIENE_TYPE_SUBSTRINGS):
+            network_tag.append(agg)
+        else:
+            other[key] = agg
+    if len(network_tag) > 1:
+        merged = _Agg(title_display="Missing required tags (network resources)")
+        for a in network_tag:
+            if a.sample_rec:
+                merged.add(a.sample_rec, a.elig_ee, a.bucket)
+            merged.count += a.count - 1  # add() already added 1
+        other["__network_tag_merged__"] = merged
+    elif len(network_tag) == 1:
+        other[list(network_tag[0].title_display)[:50] or "__net__"] = network_tag[0]
+    return other
+
+
 def format_deferral_markdown(
     low_groups: dict[str, _Agg],
     def_groups: dict[str, _Agg],
 ) -> str:
+    n_low = sum(1 for _ in low_groups)
+    n_def = sum(1 for _ in def_groups)
+
     lines: list[str] = [
-        "Low Priority Items (Safe to Defer)",
+        "**Summary**",
+        f"- Low Priority Items: {n_low}",
+        f"- Deferred but Important: {n_def}",
         "",
     ]
+
+    # ── SECTION 1: LOW PRIORITY ──────────────────────────────────────────────
+    lines.append("---")
+    lines.append("**LOW PRIORITY (Safe to Defer)**")
+    lines.append("")
     if not low_groups:
         lines.append("None")
-        lines.append("")
     else:
-        for agg in sorted(low_groups.values(), key=lambda a: a.title_display.lower()):
-            lines.append(f"- {agg.title_display}")
-            lines.append(f"  Count: {agg.count}")
-            lines.append(f"  Savings: {_format_savings(agg.max_savings)}")
-            lines.append(f"  Eligibility: {_execution_eligibility_label(agg.elig_ee)}")
-            lines.append(f"  Why it is low priority: {_why_low(agg.sample_rec) if agg.sample_rec else ''}")
-            lines.append("")
+        merged_low = _group_similar(low_groups)
+        # Group by recommendation type label
+        type_buckets: dict[str, list[_Agg]] = {}
+        for agg in merged_low.values():
+            label = _rec_type_label(agg)
+            type_buckets.setdefault(label, []).append(agg)
+        for type_label in sorted(type_buckets):
+            lines.append(f"*{type_label}*")
+            for agg in sorted(type_buckets[type_label], key=lambda a: (-a.count, a.title_display.lower())):
+                lines.append(f"**{agg.title_display}**")
+                lines.append(f"- Count: {agg.count}")
+                lines.append(f"- Reason: {_why_low(agg.sample_rec) if agg.sample_rec else 'Low impact'}")
+                lines.append("")
 
-    lines.append("Deferred But Important")
+    # ── SECTION 2: DEFERRED BUT IMPORTANT ──────────────────────────────────
+    lines.append("---")
+    lines.append("**DEFERRED BUT IMPORTANT**")
     lines.append("")
     if not def_groups:
         lines.append("None")
-        lines.append("")
     else:
-        for agg in sorted(def_groups.values(), key=lambda a: a.title_display.lower()):
-            lines.append(f"- {agg.title_display}")
-            lines.append(f"  Count: {agg.count}")
-            lines.append(f"  Savings: {_format_savings(agg.max_savings)}")
-            lines.append(f"  Eligibility: {_execution_eligibility_label(agg.elig_ee)}")
-            lines.append(
-                f"  Why it is deferred but important: "
-                f"{_why_deferred(agg.sample_rec) if agg.sample_rec else ''}"
-            )
-            lines.append("")
+        merged_def = _group_similar(def_groups)
+        # Group by category
+        cat_buckets: dict[str, list[_Agg]] = {}
+        for agg in merged_def.values():
+            cat_buckets.setdefault(agg.category or "Configuration", []).append(agg)
 
-    n_low = len(low_groups)
-    n_def = len(def_groups)
-    lines.append("Summary")
-    lines.append("")
-    lines.append(f"- Total unique low priority items: {n_low}")
-    lines.append(f"- Total unique deferred but important items: {n_def}")
-    lines.append(
-        "- Hygiene-style items under $10 with no elevated risk can wait. "
-        "Anything blocked with meaningful savings, security exposure, or higher risk should stay on your radar for when execution becomes ready."
-    )
+        for cat in sorted(cat_buckets, key=lambda c: _CATEGORY_SORT_ORDER.get(c, 99)):
+            lines.append(f"**[Category: {cat}]**")
+            lines.append("")
+            # Sort within category: elevated risk first, then by savings desc, then count desc
+            def _sort_key(a: _Agg) -> tuple:
+                risk = _risk_norm(a.sample_rec) if a.sample_rec else "unspecified"
+                risk_order = {"high": 0, "medium": 1, "low": 2, "unspecified": 3}[risk]
+                sec = 0 if (a.sample_rec and _is_security_significant(a.sample_rec)) else 1
+                return (sec, risk_order, -(a.max_savings or 0), -a.count)
+
+            for agg in sorted(cat_buckets[cat], key=_sort_key):
+                lines.append(f"**{agg.title_display}**")
+                lines.append(f"- Count: {agg.count}")
+                lines.append(f"- Why it matters: {_why_deferred(agg.sample_rec) if agg.sample_rec else 'Blocked'}")
+                lines.append(f"- Status: {_execution_eligibility_label(agg.elig_ee)}")
+                lines.append("")
+
     return "\n".join(lines).rstrip() + "\n"
 
 
