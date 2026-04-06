@@ -54,5 +54,5 @@ def pending_approvals_count(
 ) -> dict:
     org_id = tenant_scope_service.require_data_access_organization_id(db_session, ctx)
     _require_approver(db_session, ctx, org_id)
-    n = approvals_service.count_pending_approvals_for_organization(db_session, org_id)
+    n = approvals_service.count_pending_approvals_for_user(db_session, org_id, ctx.user_id)
     return {"count": n}

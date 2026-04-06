@@ -62,8 +62,29 @@ def _preview_payload(
     return status, impact, checks
 
 
+def count_pending_approvals_for_user(db: Session, organization_id: UUID, user_id: UUID | None) -> int:
+    """Count ApprovalAssignment rows where this user is an assignee with pending status.
+
+    This is the badge count — items the current user personally needs to act on.
+    """
+    if user_id is None:
+        return 0
+    from app.models.approval_request import ApprovalAssignment, ApprovalRequest
+    return (
+        db.query(ApprovalAssignment)
+        .join(ApprovalRequest, ApprovalRequest.id == ApprovalAssignment.approval_request_id)
+        .filter(
+            ApprovalRequest.organization_id == organization_id,
+            ApprovalRequest.status.in_(["submitted", "partially_approved"]),
+            ApprovalAssignment.approver_user_id == user_id,
+            ApprovalAssignment.status == "pending",
+        )
+        .count()
+    )
+
+
 def count_pending_approvals_for_organization(db: Session, organization_id: UUID) -> int:
-    """Count pending items without building preview payloads."""
+    """Count ALL pending items for the org (used by the approvals queue page total)."""
     tenant_ids = [
         tid
         for (tid,) in db.query(Tenant.id).filter(Tenant.organization_id == organization_id).all()
