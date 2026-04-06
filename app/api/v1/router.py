@@ -12,10 +12,13 @@ from app.api.v1.cost import router as cost_router
 from app.api.v1.execution_policies import router as execution_policies_router
 from app.api.v1.me import router as me_router
 from app.api.v1.notifications import router as notifications_router
+from app.api.v1.notification_config import router as notification_config_router
 from app.api.v1.outcomes import router as outcomes_router
 from app.api.v1.recommendations import router as recommendations_router
 from app.api.v1.sync_pipeline import router as sync_router
 from app.api.v1.sync_cost import router as sync_cost_router
+from app.api.v1.aws_onboarding import router as aws_onboarding_router
+from app.api.v1.integrations import router as integrations_router
 from app.api.v1.root.router import router as root_router
 from app.api.v1.tenants import router as tenants_router
 
@@ -33,6 +36,7 @@ router.include_router(orgs_router)
 router.include_router(tenants_router)
 router.include_router(me_router)
 router.include_router(notifications_router)
+router.include_router(notification_config_router)
 router.include_router(approval_requests_router)
 router.include_router(approvals_router)
 router.include_router(cloud_accounts_router)
@@ -44,4 +48,6 @@ router.include_router(cost_router)
 router.include_router(execution_policies_router)
 router.include_router(sync_router)
 router.include_router(sync_cost_router)
+router.include_router(aws_onboarding_router)
+router.include_router(integrations_router)
 router.include_router(root_router)

@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -27,6 +27,19 @@ class CloudAccount(Base):
     region_default = Column(String(64), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    # ── CloudFormation-based self-service onboarding fields ──────────────────
+    # Onboarding mode chosen by the user when starting the CF flow.
+    onboarding_mode = Column(String(32), nullable=True)  # 'read_only' | 'read_and_execution'
+    # Separate status tracking for each role (coarser than connection_status).
+    read_only_status = Column(String(32), nullable=True)   # pending|awaiting_role_arn|validating|connected|failed
+    execution_status = Column(String(32), nullable=True)   # not_configured|awaiting_role_arn|validating|connected|failed
+    # UTC timestamp when the customer clicked "Launch CloudFormation".
+    cf_stack_launched_at = Column(DateTime(timezone=True), nullable=True)
+    # User who initiated the CF onboarding (nullable for anonymous/invite-token flows).
+    created_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # Opaque token used to access the onboarding page via a shareable invite link.
+    onboarding_token = Column(String(128), nullable=True, unique=True)
 
     tenant = relationship("Tenant", back_populates="cloud_accounts")
     resource_snapshots = relationship("ResourceSnapshot", back_populates="cloud_account", cascade="all, delete-orphan")

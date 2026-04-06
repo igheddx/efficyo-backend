@@ -10,6 +10,14 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.models.recommendation import Recommendation
+from app.schemas.ai_response import (
+    DeferredImportantItem,
+    LowPriorityItem,
+    ResponseMeta,
+    ResponseSection,
+    ResponseSummary,
+    StructuredAIResponse,
+)
 from app.services.execution_eligibility_service import compute_execution_eligibility
 from app.services import recommendation_service
 
@@ -357,6 +365,109 @@ def format_deferral_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+# ── Structured output ─────────────────────────────────────────────────────────
+
+_CAT_TO_TYPE: dict[str, str] = {
+    "Security": "security",
+    "Cost Optimization": "cost",
+    "Governance / Tagging": "governance",
+    "Configuration": "configuration",
+}
+
+
+def _cat_to_type(cat: str) -> str:
+    return _CAT_TO_TYPE.get(cat, "configuration")
+
+
+def format_deferral_structured(
+    low_groups: dict[str, _Agg],
+    def_groups: dict[str, _Agg],
+) -> StructuredAIResponse:
+    """Return a :class:`StructuredAIResponse` for the low_priority intent.
+
+    The frontend renders from ``sections[]`` — no markdown parsing required.
+    """
+    n_low = sum(a.count for a in low_groups.values())
+    n_def = sum(a.count for a in def_groups.values())
+
+    sections: list[ResponseSection] = []
+
+    # ── LOW PRIORITY section ──────────────────────────────────────────────────
+    if low_groups:
+        merged_low = _group_similar(low_groups)
+        type_buckets: dict[str, list[_Agg]] = {}
+        for agg in merged_low.values():
+            label = _rec_type_label(agg)
+            type_buckets.setdefault(label, []).append(agg)
+
+        lp_items: list[dict[str, Any]] = []
+        for type_label in sorted(type_buckets):
+            for agg in sorted(type_buckets[type_label], key=lambda a: (-a.count, a.title_display.lower())):
+                lp_items.append(
+                    LowPriorityItem(
+                        title=agg.title_display,
+                        group=type_label,
+                        count=agg.count,
+                        reason=_why_low(agg.sample_rec) if agg.sample_rec else "Low impact",
+                    ).model_dump()
+                )
+        sections.append(
+            ResponseSection(
+                section_type="low_priority",
+                title="LOW PRIORITY — Safe to Defer",
+                items=lp_items,
+            )
+        )
+
+    # ── DEFERRED BUT IMPORTANT section ───────────────────────────────────────
+    if def_groups:
+        merged_def = _group_similar(def_groups)
+        cat_buckets: dict[str, list[_Agg]] = {}
+        for agg in merged_def.values():
+            cat_buckets.setdefault(agg.category or "Configuration", []).append(agg)
+
+        def _sort_key_def(a: _Agg) -> tuple:
+            risk = _risk_norm(a.sample_rec) if a.sample_rec else "unspecified"
+            risk_order = {"high": 0, "medium": 1, "low": 2, "unspecified": 3}[risk]
+            sec = 0 if (a.sample_rec and _is_security_significant(a.sample_rec)) else 1
+            return (sec, risk_order, -(a.max_savings or 0), -a.count)
+
+        _impact_map: dict[str, str] = {"high": "high", "medium": "medium", "low": "low"}
+
+        def_items: list[dict[str, Any]] = []
+        for cat in sorted(cat_buckets, key=lambda c: _CATEGORY_SORT_ORDER.get(c, 99)):
+            for agg in sorted(cat_buckets[cat], key=_sort_key_def):
+                risk = _risk_norm(agg.sample_rec) if agg.sample_rec else "unspecified"
+                def_items.append(
+                    DeferredImportantItem(
+                        title=agg.title_display,
+                        category=_cat_to_type(cat),  # type: ignore[arg-type]
+                        group=cat,
+                        count=agg.count,
+                        status=_execution_eligibility_label(agg.elig_ee),
+                        impact=_impact_map.get(risk),  # type: ignore[arg-type]
+                        reason=_why_deferred(agg.sample_rec) if agg.sample_rec else "Blocked",
+                    ).model_dump()
+                )
+        sections.append(
+            ResponseSection(
+                section_type="deferred_important",
+                title="DEFERRED BUT IMPORTANT",
+                items=def_items,
+            )
+        )
+
+    return StructuredAIResponse(
+        response_type="low_priority",
+        title="Low Priority & Deferred Items",
+        summary=ResponseSummary(
+            counts={"low_priority": n_low, "deferred_important": n_def},
+        ),
+        sections=sections,
+        meta=ResponseMeta(response_type="low_priority"),
+    )
+
+
 def _eligibility_for_rec(
     db: Session,
     organization_id: UUID,
@@ -405,8 +516,8 @@ def build_low_priority_copilot_answer(
     organization_id: UUID,
     tenant_id: UUID,
     cloud_account_id: UUID,
-) -> tuple[str, int]:
-    """Returns (markdown answer, count of recommendations evaluated)."""
+) -> tuple[str, StructuredAIResponse, int]:
+    """Returns (markdown answer, structured response, count of recommendations evaluated)."""
     recs = recommendation_service.list_recommendations(
         db, tenant_id, cloud_account_id, latest_only=True
     )[:60]
@@ -419,4 +530,4 @@ def build_low_priority_copilot_answer(
         max_evaluate=60,
     )
     low_g, def_g = _aggregate(rows)
-    return format_deferral_markdown(low_g, def_g), n_eval
+    return format_deferral_markdown(low_g, def_g), format_deferral_structured(low_g, def_g), n_eval

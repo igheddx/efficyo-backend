@@ -4,6 +4,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy.orm import Session
+from unittest.mock import patch
 
 from app.models.policy_profile import PolicyProfile
 from app.models.tenant import Tenant
@@ -53,7 +54,9 @@ class TestTenantService:
         db.add(PolicyProfile(tenant_id=TIPWAVE_TENANT_ID, name="default", config_json={}))
         db.commit()
 
-        ensure_demo_tenants(db)
+        with patch("app.services.tenant_service.settings") as mock_s:
+            mock_s.enable_demo_and_local_seed = True
+            ensure_demo_tenants(db)
 
         stable = db.query(Tenant).filter(Tenant.id == TIPWAVE_TENANT_ID).one()
         assert stable.name == "Tipwave"

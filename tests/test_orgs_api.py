@@ -27,7 +27,6 @@ def test_root_creates_and_lists_org(client: TestClient, db):
     assert r2.status_code == 200
     names = {row["name"] for row in r2.json()}
     assert "Acme" in names
-    assert "demo_MSP" in names  # seeded demo org for local testing
 
 
 def test_org_admin_requires_db_membership(client: TestClient):

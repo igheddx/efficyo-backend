@@ -1,4 +1,4 @@
-"""Defer / low-priority Copilot: two-bucket classification and markdown formatting."""
+"""Defer / low-priority Copilot: two-bucket classification and markdown/structured formatting."""
 
 from types import SimpleNamespace
 from uuid import uuid4
@@ -7,6 +7,7 @@ from app.services.copilot_low_priority_service import (
     _aggregate,
     classify_deferral_bucket,
     format_deferral_markdown,
+    format_deferral_structured,
 )
 
 
@@ -79,3 +80,73 @@ def test_markdown_sections_and_none():
     assert "DEFERRED BUT IMPORTANT" in text
     assert "Summary" in text
     assert "Low Priority Items: 0" in text
+
+
+# ── Structured output ─────────────────────────────────────────────────────────
+
+def test_structured_deferral_empty_groups():
+    r = format_deferral_structured({}, {})
+    assert r.response_type == "low_priority"
+    assert r.summary.counts.get("low_priority", 0) == 0
+    assert r.summary.counts.get("deferred_important", 0) == 0
+    assert r.sections == []
+
+
+def test_structured_deferral_low_section():
+    rec = _rec(savings=2.0, rtype="s3_add_required_tags", summary="Add tags")
+    from app.services.copilot_low_priority_service import _Agg
+
+    agg = _Agg(title_display="Add tags")
+    agg.add(rec, {"execution_eligible": False}, "low")
+
+    r = format_deferral_structured({"key": agg}, {})
+    assert len(r.sections) == 1
+    s = r.sections[0]
+    assert s.section_type == "low_priority"
+    assert len(s.items) == 1
+    assert s.items[0]["count"] == 1
+    assert s.items[0]["title"] == "Add tags"
+    assert r.summary.counts["low_priority"] == 1
+    assert r.summary.counts.get("deferred_important", 0) == 0
+
+
+def test_structured_deferral_deferred_section():
+    rec = _rec(savings=25.0, rtype="ec2_rightsizing", category="cost", risk="medium")
+    from app.services.copilot_low_priority_service import _Agg
+
+    agg = _Agg(title_display="EC2 rightsizing")
+    agg.add(rec, {"execution_eligible": False, "blocking_reason": "approval_required"}, "deferred_important")
+
+    r = format_deferral_structured({}, {"key": agg})
+    assert len(r.sections) == 1
+    s = r.sections[0]
+    assert s.section_type == "deferred_important"
+    assert s.items[0]["category"] == "cost"
+    assert s.items[0]["status"] == "approval_required"
+    assert r.summary.counts["deferred_important"] == 1
+
+
+def test_structured_deferral_both_sections():
+    from app.services.copilot_low_priority_service import _Agg
+
+    rec_low = _rec(savings=2.0, rtype="s3_add_required_tags")
+    agg_low = _Agg(title_display="Add tags")
+    agg_low.add(rec_low, {"execution_eligible": False}, "low")
+
+    rec_def = _rec(savings=30.0, rtype="ec2_rightsizing", category="cost", risk="high")
+    agg_def = _Agg(title_display="EC2 rightsizing")
+    agg_def.add(rec_def, {"execution_eligible": False, "blocking_reason": "approval_required"}, "deferred_important")
+
+    r = format_deferral_structured({"low_key": agg_low}, {"def_key": agg_def})
+    section_types = {s.section_type for s in r.sections}
+    assert "low_priority" in section_types
+    assert "deferred_important" in section_types
+    assert r.summary.counts["low_priority"] == 1
+    assert r.summary.counts["deferred_important"] == 1
+
+
+def test_structured_meta_fields():
+    r = format_deferral_structured({}, {})
+    assert r.meta.response_type == "low_priority"
+    assert r.meta.version == "1"
+    assert len(r.meta.generated_at) > 0

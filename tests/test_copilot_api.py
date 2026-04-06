@@ -55,6 +55,14 @@ def test_copilot_query_returns_structured_response(client, db, dev_org_scope, mo
     assert "priority_actions" in data and isinstance(data["priority_actions"], list)
     assert "insights" in data and isinstance(data["insights"], list)
     assert "suggested_next_steps" not in data
+    # structured field must always be present (null for LLM path, object for rules/fallback path)
+    assert "structured" in data
+    if data.get("structured") is not None:
+        s = data["structured"]
+        assert "response_type" in s
+        assert "sections" in s
+        assert "summary" in s
+        assert "meta" in s
     if data.get("debug") is not None:
         assert data["debug"]["detected_intent"] == "prioritize"
         assert isinstance(data["debug"]["context_item_count"], int)
@@ -162,3 +170,10 @@ def test_copilot_low_priority_skips_llm(client, db, dev_org_scope, monkeypatch):
     assert data["priority_actions"] == []
     assert data["insights"] == []
     assert "Summary" in data["answer"] and "Low Priority Items" in data["answer"]
+    # structured JSON contract must be present for low_priority intent
+    assert data.get("structured") is not None, "low_priority must return structured response"
+    structured = data["structured"]
+    assert structured["response_type"] == "low_priority"
+    assert isinstance(structured["sections"], list)
+    assert isinstance(structured["summary"]["counts"], dict)
+    assert structured["meta"]["version"] == "1"

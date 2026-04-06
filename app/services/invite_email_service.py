@@ -327,3 +327,95 @@ def send_co_approver_cancellation_email(
             return
 
     logger.warning("Unknown email provider '%s'. Co-approver cancellation email not sent.", settings.email_provider)
+
+
+def send_aws_connect_invite_email(
+    *,
+    recipient_email: str,
+    connect_url: str,
+    org_name: str | None = None,
+    tenant_name: str | None = None,
+) -> bool:
+    """Send an AWS account connect invitation to a customer.
+
+    Returns True if the email was dispatched (or logging-only mode),
+    False if it was suppressed by the allowlist.
+    """
+    app_url = _app_url()
+    greeting_name = "there"
+    subject = "Connect your AWS account to MEEZI"
+    preheader = "You've been invited to connect your AWS account to MEEZI."
+
+    context_line = ""
+    if org_name and tenant_name:
+        context_line = f"<p style=\"margin:0 0 16px;color:#374151;\">This invitation is for <strong>{tenant_name}</strong> under the <strong>{org_name}</strong> organization.</p>"
+    elif tenant_name:
+        context_line = f"<p style=\"margin:0 0 16px;color:#374151;\">This invitation is for <strong>{tenant_name}</strong>.</p>"
+
+    body_text = "\n".join([
+        f"Hi {greeting_name},",
+        "",
+        "You have been invited to connect your AWS account to MEEZI.",
+        "",
+        _app_description_line(),
+        "",
+        "To get started, click the link below and follow the on-screen instructions.",
+        "You will be guided through deploying a CloudFormation stack that grants MEEZI",
+        "read (and optionally execution) access to your AWS environment.",
+        "",
+        f"Connect your AWS account: {connect_url}",
+        "",
+        "No AWS credentials are stored by MEEZI — access is granted via cross-account IAM roles only.",
+        "",
+        "If you did not expect this invitation, you can safely ignore this email.",
+    ])
+
+    body_html = f"""
+        <p style="margin:0 0 16px;font-size:16px;color:#111827;">Hi {greeting_name},</p>
+        <p style="margin:0 0 16px;color:#374151;">You have been invited to connect your AWS account to <strong>MEEZI</strong>.</p>
+        {context_line}
+        <p style="margin:0 0 16px;color:#374151;">{_app_description_line()}</p>
+        <p style="margin:0 0 8px;color:#374151;">
+          Click the button below to get started. You will be guided through deploying a CloudFormation
+          stack that grants MEEZI read (and optionally execution) access to your AWS environment.
+        </p>
+        {_cta_button(connect_url, "Connect AWS Account &rarr;")}
+        <p style="margin:16px 0 0;font-size:13px;color:#6b7280;">
+          No AWS credentials are stored by MEEZI — access is granted via cross-account IAM roles only.
+        </p>"""
+
+    if not settings.email_enabled:
+        logger.info(
+            "AWS connect invite email disabled (logging only). email=%s connect_url=%s",
+            recipient_email,
+            connect_url,
+        )
+        return True
+
+    if not _should_send_to(recipient_email):
+        logger.info("AWS connect invite email skipped due to allowlist. email=%s", recipient_email)
+        return False
+
+    if settings.email_provider == "ses":
+        try:
+            _ses_client().send_email(
+                Source=settings.ses_from_email,
+                Destination={"ToAddresses": [recipient_email]},
+                Message={
+                    "Subject": {"Data": subject, "Charset": "UTF-8"},
+                    "Body": {
+                        "Text": {"Data": body_text, "Charset": "UTF-8"},
+                        "Html": {
+                            "Data": _html_email(title=subject, preheader=preheader, body_html=body_html),
+                            "Charset": "UTF-8",
+                        },
+                    },
+                },
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to send AWS connect invite email through SES. email=%s", recipient_email)
+            raise
+
+    logger.warning("Unknown email provider '%s'. AWS connect invite email not sent.", settings.email_provider)
+    return False

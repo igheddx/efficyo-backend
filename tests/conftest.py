@@ -44,6 +44,9 @@ def db() -> Generator[Session, None, None]:
     from app.models.resource_snapshot import ResourceSnapshot  # noqa: F401
     from app.models.tenant import Tenant  # noqa: F401
     from app.models.notification import Notification  # noqa: F401
+    from app.models.notification_delivery_log import NotificationDeliveryLog  # noqa: F401
+    from app.models.org_integration import OrgIntegration  # noqa: F401
+    from app.models.user_notification_destination import UserNotificationDestination  # noqa: F401
     from app.models.approval_request import ApprovalAssignment, ApprovalRequest  # noqa: F401
     from app.models.execution_owner import ExecutionOwnerAssignment  # noqa: F401
     from app.models.access_grant import AccessGrant  # noqa: F401
@@ -52,6 +55,9 @@ def db() -> Generator[Session, None, None]:
     from app.models.account_tag_key import AccountTagKey  # noqa: F401
     from app.models.cost_snapshot import CostApiUsageLog, CostFetchLock, CostSnapshot, CostSyncPolicy  # noqa: F401
     from app.models.tagging_batch import TaggingBatch, TaggingBatchResource  # noqa: F401
+    from app.models.notification_policy import NotificationPolicy  # noqa: F401
+    from app.models.notification_schedule import NotificationSchedule  # noqa: F401
+    from app.models.notification_snooze import NotificationSnooze  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     session = TestingSessionLocal()

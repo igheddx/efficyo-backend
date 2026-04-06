@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.schemas.ai_response import FallbackAIResponse, StructuredAIResponse  # noqa: F401 – re-exported
+
 CopilotActionType = Literal["execute_now", "approve", "review", "investigate", "fix_failure"]
 
 
@@ -51,3 +53,17 @@ class CopilotQueryResponse(BaseModel):
         description="Up to 3 specific follow-ups after post-processing.",
     )
     debug: CopilotDebugInfo | None = None
+    structured: StructuredAIResponse | None = Field(
+        default=None,
+        description=(
+            "Structured JSON rendering contract. When present the frontend renders "
+            "from sections[] instead of parsing the answer text blob."
+        ),
+    )
+    fallback: FallbackAIResponse | None = Field(
+        default=None,
+        description=(
+            "Set when the query cannot be meaningfully answered. "
+            "The frontend renders this instead of structured/answer when present."
+        ),
+    )
