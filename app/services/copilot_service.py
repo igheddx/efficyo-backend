@@ -12,8 +12,24 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.schemas.ai_response import (
+    ApprovalSummaryItem,
+    GroupedRecommendationItem,
+    MetricItem,
+    NarrativeItem,
+    ResponseMeta,
+    ResponseSection,
+    ResponseSummary,
+    SavingsSummaryItem,
+    StructuredAIResponse,
+    TopActionItem,
+    TrendItem,
+    WarningItem,
+    WorkflowSummaryItem,
+)
 from app.schemas.copilot import CopilotDebugInfo, CopilotPriorityAction, CopilotQueryResponse
 from app.services.copilot_context_service import run_intent_and_scoped_context
+from app.services.copilot_fallback_service import build_fallback_response, classify_query_feasibility
 from app.services.copilot_intent_service import count_context_payload_items
 from app.services.copilot_low_priority_service import build_low_priority_copilot_answer
 from app.services.copilot_llm_context import (
@@ -23,7 +39,33 @@ from app.services.copilot_llm_context import (
 
 logger = logging.getLogger(__name__)
 
-# Final response caps after post-processing
+# ── Structured-response helpers ────────────────────────────────────────────────
+
+def _score_to_impact(score: float) -> str | None:
+    if score >= 70:
+        return "high"
+    if score >= 40:
+        return "medium"
+    return "low"
+
+
+def _risk_to_impact(risk: Any) -> str | None:
+    r = (risk or "").strip().lower()
+    return r if r in ("high", "medium", "low") else None
+
+
+def _at_to_actionability(action_type: Any) -> str | None:
+    at = str(action_type or "").strip().lower()
+    if at == "execute_now":
+        return "auto"
+    if at in ("review", "investigate"):
+        return "guided"
+    if at in ("approve", "fix_failure"):
+        return "review_required"
+    return None
+
+
+# ── Final response caps after post-processing ─────────────────────────────────
 _MAX_COPILOT_PRIORITIES = 3
 _MAX_INSIGHTS_FINAL = 3
 
@@ -239,6 +281,330 @@ def _fallback_attention_response(
         lead += " (Your access is viewer — pair with an approver for sign-off and execution.)"
     insights = [a.next_step for a in actions if a.next_step][: _MAX_INSIGHTS_FINAL]
     return CopilotQueryResponse(answer=lead[:8000], priority_actions=actions, insights=insights)
+
+
+def _fallback_attention_structured(
+    scored: list[dict[str, Any]],
+    *,
+    intent: str,
+) -> StructuredAIResponse:
+    """Build a StructuredAIResponse for the attention fallback (prioritize/blockers)."""
+    items = [
+        TopActionItem(
+            title=str(row.get("title") or "")[:200],
+            impact=_score_to_impact(float(row.get("impact_score") or 0)),  # type: ignore[arg-type]
+            confidence="medium",
+            actionability=_at_to_actionability(row.get("action_type")),  # type: ignore[arg-type]
+            why_now=str(row.get("why_action_needed") or "")[:500],
+            action_type=_action_type_ok(row.get("action_type")),
+            entity_type=_entity_type_ok(row.get("entity_type")),
+            entity_id=str(row.get("entity_id")) if row.get("entity_id") else None,
+            next_step=_NEXT_STEP_BY_TYPE.get(
+                _action_type_ok(row.get("action_type")) or "investigate",
+                _NEXT_STEP_BY_TYPE["investigate"],
+            ),
+        )
+        for row in scored[:_MAX_COPILOT_PRIORITIES]
+    ]
+    title = "Top Priorities" if intent == "prioritize" else "Active Blockers"
+    return StructuredAIResponse(
+        response_type=intent,
+        title=title,
+        summary=ResponseSummary(counts={"top_actions": len(items)}),
+        sections=[
+            ResponseSection(
+                section_type="top_actions",
+                title=title,
+                items=[i.model_dump() for i in items],
+            )
+        ] if items else [],
+        meta=ResponseMeta(response_type=intent),
+    )
+
+
+def _rules_based_structured(
+    intent: str,
+    scoped: dict[str, Any],
+) -> StructuredAIResponse:
+    """Build a StructuredAIResponse from rules-based context data."""
+    sections: list[ResponseSection] = []
+    summary_counts: dict[str, int] = {}
+
+    if intent in ("prioritize", "blockers"):
+        scored = scoped.get("scored_attention_top") or []
+        items = [
+            TopActionItem(
+                title=str(row.get("title") or "")[:200],
+                impact=_score_to_impact(float(row.get("impact_score") or 0)),  # type: ignore[arg-type]
+                confidence="medium",
+                actionability=_at_to_actionability(row.get("action_type")),  # type: ignore[arg-type]
+                why_now=str(row.get("why_action_needed") or "")[:500],
+                action_type=_action_type_ok(row.get("action_type")),
+                entity_type=_entity_type_ok(row.get("entity_type")),
+                entity_id=str(row.get("entity_id")) if row.get("entity_id") else None,
+                next_step=_NEXT_STEP_BY_TYPE.get(
+                    _action_type_ok(row.get("action_type")) or "investigate",
+                    _NEXT_STEP_BY_TYPE["investigate"],
+                ),
+            )
+            for row in scored[:_MAX_COPILOT_PRIORITIES]
+        ]
+        if items:
+            label = "Top Priorities" if intent == "prioritize" else "Active Blockers"
+            sections.append(
+                ResponseSection(
+                    section_type="top_actions",
+                    title=label,
+                    items=[i.model_dump() for i in items],
+                )
+            )
+        summary_counts["top_actions"] = len(items)
+
+    elif intent == "approvals":
+        pending = scoped.get("pending_approvals") or []
+        ap_items = [
+            ApprovalSummaryItem(
+                title=(pa.get("summary") or "Pending approval")[:100],
+                risk_level=pa.get("risk_level"),
+                estimated_savings=float(pa["estimated_savings"]) if pa.get("estimated_savings") is not None else None,
+                preflight_status=pa.get("preflight_status"),
+                approvals_complete=pa.get("approvals_complete"),
+                approvals_required=pa.get("approvals_required"),
+                entity_id=pa.get("approval_request_id"),
+                reason=(
+                    f"{pa.get('approvals_complete', 0)}/{pa.get('approvals_required', 0)} approvals recorded"
+                ),
+            )
+            for pa in pending[:5]
+        ]
+        if ap_items:
+            sections.append(
+                ResponseSection(
+                    section_type="approvals_summary",
+                    title="Pending Approvals",
+                    items=[i.model_dump() for i in ap_items],
+                )
+            )
+        summary_counts["pending_approvals"] = len(ap_items)
+
+    elif intent == "executions":
+        ready = scoped.get("ready_to_execute") or []
+        not_ready = scoped.get("not_ready_to_execute") or []
+        wf_items = []
+        for r in (list(ready) + list(not_ready))[:5]:
+            ee = r.get("execution_eligibility") or {}
+            elig = bool(ee.get("execution_eligible"))
+            wf_items.append(
+                WorkflowSummaryItem(
+                    title=(r.get("summary") or r.get("recommendation_type") or "Recommendation")[:90],
+                    status="ready" if elig else "blocked",
+                    entity_type="recommendation",
+                    entity_id=str(r["recommendation_id"]) if r.get("recommendation_id") else None,
+                    blocking_reason=(ee.get("blocking_reason") or None) if not elig else None,
+                    reason=(ee.get("display_label") or "Eligible") if elig else (ee.get("display_label") or ee.get("blocking_reason") or "Not eligible"),
+                )
+            )
+        if wf_items:
+            sections.append(
+                ResponseSection(
+                    section_type="workflow_summary",
+                    title="Execution Status",
+                    items=[i.model_dump() for i in wf_items],
+                )
+            )
+        summary_counts["ready"] = len(ready)
+        summary_counts["blocked"] = len(not_ready)
+
+    elif intent == "savings":
+        acc = scoped.get("savings_proof_account") or {}
+        ten = scoped.get("savings_proof_tenant") or {}
+        metric_items = []
+        if acc.get("total_estimated_monthly_savings_proof") is not None:
+            metric_items.append(
+                MetricItem(
+                    label="Account savings proof (30d)",
+                    value=float(acc["total_estimated_monthly_savings_proof"]),
+                    unit="USD/mo",
+                )
+            )
+        if ten.get("total_estimated_monthly_savings_proof") is not None:
+            metric_items.append(
+                MetricItem(
+                    label="Tenant savings proof (30d)",
+                    value=float(ten["total_estimated_monthly_savings_proof"]),
+                    unit="USD/mo",
+                )
+            )
+        if metric_items:
+            sections.append(
+                ResponseSection(
+                    section_type="metrics",
+                    title="Savings Proof",
+                    items=[i.model_dump() for i in metric_items],
+                )
+            )
+        tops = scoped.get("top_opportunities") or []
+        if not tops:
+            summ = scoped.get("summary") or {}
+            if isinstance(summ, dict):
+                tso = summ.get("top_savings_opportunity")
+                if isinstance(tso, dict) and tso.get("recommendation_id"):
+                    tops = [tso]
+        sav_items = [
+            SavingsSummaryItem(
+                label=(t.get("summary") or t.get("recommendation_type") or "Opportunity")[:80],
+                amount=float(t["estimated_savings"]) if t.get("estimated_savings") is not None else None,
+                entity_type="recommendation",
+                entity_id=str(t["recommendation_id"]) if t.get("recommendation_id") else None,
+                reason=f"Risk {t.get('risk_level') or 'n/a'}",
+            )
+            for t in tops[:3]
+        ]
+        if sav_items:
+            sections.append(
+                ResponseSection(
+                    section_type="savings_summary",
+                    title="Top Savings Opportunities",
+                    items=[i.model_dump() for i in sav_items],
+                )
+            )
+        cost_trends = scoped.get("cost_trends")
+        if isinstance(cost_trends, list):
+            trend_items = []
+            for t in cost_trends[:5]:
+                pct = t.get("percent_change")
+                pct_f = float(pct) if pct is not None else None
+                direction = "flat"
+                if pct_f is not None:
+                    direction = "up" if pct_f > 0 else ("down" if pct_f < 0 else "flat")
+                trend_items.append(
+                    TrendItem(
+                        service=str(t.get("service") or "Unknown"),
+                        direction=direction,  # type: ignore[arg-type]
+                        percent_change=pct_f,
+                        label=t.get("trend"),
+                    )
+                )
+            if trend_items:
+                sections.append(
+                    ResponseSection(
+                        section_type="trends_summary",
+                        title="Cost Trends",
+                        items=[i.model_dump() for i in trend_items],
+                    )
+                )
+
+    elif intent == "tenants":
+        directory = scoped.get("tenant_directory") or []
+        trouble = [d for d in directory if (d.get("cloud_accounts_with_connection_issues") or 0) > 0]
+        if trouble:
+            sections.append(
+                ResponseSection(
+                    section_type="warnings",
+                    title="Tenants with Connection Issues",
+                    items=[
+                        WarningItem(
+                            message=(
+                                f"{d.get('tenant_name') or 'Unknown'}: "
+                                f"{d.get('cloud_accounts_with_connection_issues')} account(s) with connection issues"
+                            ),
+                            severity="warning",
+                        ).model_dump()
+                        for d in trouble[:5]
+                    ],
+                )
+            )
+        summary_counts["tenants_with_issues"] = len(trouble)
+        cur = scoped.get("current_cloud_summary") or {}
+        if isinstance(cur, dict) and not cur.get("error"):
+            tso = cur.get("top_savings_opportunity")
+            if isinstance(tso, dict) and tso.get("summary"):
+                sections.append(
+                    ResponseSection(
+                        section_type="narrative",
+                        title="Current Account",
+                        items=[
+                            NarrativeItem(
+                                text=f"Top opportunity: {tso['summary'][:200]}"
+                            ).model_dump()
+                        ],
+                    )
+                )
+
+    else:  # general_summary
+        summ = scoped.get("summary") or {}
+        metric_items = []
+        if isinstance(summ, dict) and not summ.get("error"):
+            metric_items.append(
+                MetricItem(
+                    label="Total recommendations",
+                    value=int(summ.get("total_recommendations") or 0),
+                )
+            )
+            if summ.get("total_estimated_monthly_savings") is not None:
+                metric_items.append(
+                    MetricItem(
+                        label="Est. monthly savings opportunity",
+                        value=float(summ["total_estimated_monthly_savings"]),
+                        unit="USD/mo",
+                    )
+                )
+            if summ.get("total_cost") is not None:
+                metric_items.append(
+                    MetricItem(
+                        label="Rolling 30d spend",
+                        value=float(summ["total_cost"]),
+                        unit="USD",
+                    )
+                )
+        if metric_items:
+            sections.append(
+                ResponseSection(
+                    section_type="metrics",
+                    title="Account Overview",
+                    items=[i.model_dump() for i in metric_items],
+                )
+            )
+        tops = scoped.get("top_opportunities") or []
+        if tops:
+            gr_items = [
+                GroupedRecommendationItem(
+                    title=(t.get("summary") or t.get("recommendation_type") or "Opportunity")[:80],
+                    group="Top Opportunities",
+                    count=1,
+                    impact=_risk_to_impact(t.get("risk_level")),  # type: ignore[arg-type]
+                    reason=(
+                        f"Est. ~${float(t['estimated_savings']):,.2f}/mo"
+                        if t.get("estimated_savings") is not None
+                        else "Estimate in data"
+                    ),
+                )
+                for t in tops[:3]
+            ]
+            sections.append(
+                ResponseSection(
+                    section_type="grouped_recommendations",
+                    title="Top Opportunities",
+                    items=[i.model_dump() for i in gr_items],
+                )
+            )
+
+    _title_map = {
+        "prioritize": "Top Priorities",
+        "blockers": "Active Blockers",
+        "approvals": "Pending Approvals",
+        "executions": "Execution Status",
+        "savings": "Savings Summary",
+        "tenants": "Tenant Overview",
+        "general_summary": "Account Summary",
+    }
+    return StructuredAIResponse(
+        response_type=intent,
+        title=_title_map.get(intent, intent.replace("_", " ").title()),
+        summary=ResponseSummary(counts=summary_counts),
+        sections=sections,
+        meta=ResponseMeta(response_type=intent),
+    )
 
 
 def _rules_from_scored_attention(
@@ -604,19 +970,43 @@ def run_copilot_query(
     q = query.strip()
 
     if intent == "low_priority":
-        answer, n_eval = build_low_priority_copilot_answer(
+        answer, structured, n_eval = build_low_priority_copilot_answer(
             db,
             organization_id=organization_id,
             tenant_id=tenant_id,
             cloud_account_id=cloud_account_id,
         )
-        resp = CopilotQueryResponse(answer=answer, priority_actions=[], insights=[])
+        resp = CopilotQueryResponse(answer=answer, priority_actions=[], insights=[], structured=structured)
         if settings.debug:
             resp = resp.model_copy(
                 update={
                     "debug": CopilotDebugInfo(
                         detected_intent=intent,
                         context_item_count=n_eval,
+                        items_sent_to_llm=0,
+                        grouping_counts=None,
+                    )
+                }
+            )
+        return resp
+
+    # ── Fallback detection ─────────────────────────────────────────────────────
+    # Classify feasibility before spending cycles on LLM or rules.
+    feasibility = classify_query_feasibility(q, intent, scoped)
+    if feasibility != "supported":
+        fallback = build_fallback_response(feasibility, q, intent)
+        resp = CopilotQueryResponse(
+            answer=fallback.message,
+            priority_actions=[],
+            insights=list(fallback.suggestions[:3]),
+            fallback=fallback,
+        )
+        if settings.debug:
+            resp = resp.model_copy(
+                update={
+                    "debug": CopilotDebugInfo(
+                        detected_intent=intent,
+                        context_item_count=n_items,
                         items_sent_to_llm=0,
                         grouping_counts=None,
                     )
@@ -659,13 +1049,15 @@ def run_copilot_query(
     if _llm_response_is_weak(llm_out):
         if intent in ("prioritize", "blockers"):
             scored_fb = scoped.get("scored_attention_top") or []
-            llm_out = _postprocess_copilot_response(
+            fallback_resp = _postprocess_copilot_response(
                 _fallback_attention_response(
                     scored_fb,
                     intent=intent,
                     effective_access=effective_operational_access,
                 )
             )
+            fallback_structured = _fallback_attention_structured(scored_fb, intent=intent)
+            llm_out = fallback_resp.model_copy(update={"structured": fallback_structured})
         else:
             llm_out = None
 
@@ -680,6 +1072,8 @@ def run_copilot_query(
         query,
         effective_access=effective_operational_access,
     )
+    rules_structured = _rules_based_structured(intent, scoped)
+    rules = rules.model_copy(update={"structured": rules_structured})
     if debug:
         rules = rules.model_copy(update={"debug": _merge_debug(debug, items_sent=items_sent, grouping_counts=grouping_counts)})
     return rules

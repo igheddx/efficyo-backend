@@ -20,7 +20,12 @@ from app.schemas.me import (
     TenantSummary,
     UserContextDefaultsRead,
 )
+from app.schemas.user_notification_destination import (
+    UserNotificationDestinationPatch,
+    UserNotificationDestinationRead,
+)
 from app.services import access_resolution_service, context_defaults_service, org_service, tenant_service
+from app.services import user_notification_destination_service
 
 
 def _membership_rows(db: Session, user: User) -> list[tuple[OrgMembership, Organization]]:
@@ -336,3 +341,57 @@ def patch_user_context_defaults(db: Session, ctx: UserContext, body: ContextDefa
     context_defaults_service.reconcile_user_context_defaults(db, user, ctx_work)
     db.refresh(user)
     return build_me_read(db, ctx_work)
+
+
+def get_my_notification_destination(
+    db: Session,
+    ctx: UserContext,
+    *,
+    organization_id: UUID,
+) -> UserNotificationDestinationRead:
+    user = None
+    if ctx.user_id is not None:
+        user = db.query(User).filter(User.id == ctx.user_id).first()
+    elif ctx.email:
+        user = db.query(User).filter(User.email == str(ctx.email).strip()).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    if not user_notification_destination_service.can_user_access_org(
+        db, user.id, organization_id, bool(user.is_root_admin)
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization not accessible.")
+
+    row = user_notification_destination_service.get_or_create_destination(
+        db,
+        user_id=user.id,
+        organization_id=organization_id,
+    )
+    return UserNotificationDestinationRead.model_validate(row)
+
+
+def patch_my_notification_destination(
+    db: Session,
+    ctx: UserContext,
+    body: UserNotificationDestinationPatch,
+) -> UserNotificationDestinationRead:
+    user = None
+    if ctx.user_id is not None:
+        user = db.query(User).filter(User.id == ctx.user_id).first()
+    elif ctx.email:
+        user = db.query(User).filter(User.email == str(ctx.email).strip()).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+    if not user_notification_destination_service.can_user_access_org(
+        db, user.id, body.organization_id, bool(user.is_root_admin)
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization not accessible.")
+
+    updates = body.model_dump(exclude_unset=True)
+    updates.pop("organization_id", None)
+    row = user_notification_destination_service.patch_destination(
+        db,
+        user_id=user.id,
+        organization_id=body.organization_id,
+        updates=updates,
+    )
+    return UserNotificationDestinationRead.model_validate(row)

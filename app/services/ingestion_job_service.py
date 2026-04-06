@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
@@ -83,7 +83,11 @@ def get_active_sync_job(
         .order_by(IngestionJob.created_at.desc())
         .first()
     )
-    if candidate is not None and candidate.updated_at < cutoff:
+    if candidate is not None and (
+        candidate.updated_at.replace(tzinfo=timezone.utc)
+        if candidate.updated_at.tzinfo is None
+        else candidate.updated_at
+    ) < cutoff:
         logger.warning(
             "Auto-reaping orphaned sync job on access",
             extra={"job_id": str(candidate.id), "job_type": candidate.job_type},

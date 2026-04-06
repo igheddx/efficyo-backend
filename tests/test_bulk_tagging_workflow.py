@@ -1,3 +1,4 @@
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from app.core.db import utc_now
@@ -226,11 +227,16 @@ def test_tagging_batch_execute_only_after_all_approvals(client, db, dev_org_scop
     assert client.post(f"/api/v1/approval-requests/{req_id}/approve", headers=h1, json={}).status_code == 200
     assert client.post(f"/api/v1/approval-requests/{req_id}/approve", headers=h2, json={}).status_code == 200
 
-    executed = client.post(
-        f"/api/v1/tenants/{tenant.id}/cloud-accounts/{cloud.id}/tagging-batches/{batch['id']}/execute",
-        headers=headers,
-        json={"execution_notes": "Bulk tags applied"},
-    )
+    mock_creds = {"AccessKeyId": "FAKE", "SecretAccessKey": "FAKE", "SessionToken": "FAKE"}
+    mock_ec2 = MagicMock()
+    mock_ec2.create_tags.return_value = {}
+    with patch("app.services.bulk_tagging_service.aws_assume_role_service.assume_role", return_value=mock_creds), \
+         patch("app.services.bulk_tagging_service.boto3.client", return_value=mock_ec2):
+        executed = client.post(
+            f"/api/v1/tenants/{tenant.id}/cloud-accounts/{cloud.id}/tagging-batches/{batch['id']}/execute",
+            headers=headers,
+            json={"execution_notes": "Bulk tags applied"},
+        )
     assert executed.status_code == 200, executed.text
     stats = executed.json()
     assert stats["completed"] == 2

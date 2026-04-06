@@ -10,6 +10,19 @@ try:
 except ImportError:
     pass
 
+# ---------------------------------------------------------------------------
+# MEEZI platform constants
+# ---------------------------------------------------------------------------
+# The canonical AWS account ID that MEEZI uses to perform cross-account access.
+# This value is baked into CloudFormation trust policies and must never be
+# entered or editable by end-users.
+MEEZI_PLATFORM_AWS_ACCOUNT_ID: str = "135053815591"
+
+# Public S3 bucket where the MEEZI CloudFormation template is hosted.
+# AWS CloudFormation's quick-create URL *requires* an S3 URL for templateURL;
+# arbitrary HTTPS endpoints (e.g. the API itself) are rejected by the console.
+MEEZI_CFN_TEMPLATE_S3_BASE_URL: str = "https://meezi-cfn-templates.s3.us-east-1.amazonaws.com"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -63,6 +76,13 @@ class Settings:
     ses_aws_secret_access_key: str | None
     frontend_url: str
     api_public_url: str
+    # Platform AWS account ID — used in CloudFormation trust policies for cross-account AssumeRole.
+    # Defaults to MEEZI_PLATFORM_AWS_ACCOUNT_ID; override via FPTNEXT_PLATFORM_AWS_ACCOUNT_ID env var.
+    platform_aws_account_id: str
+    # Public S3/CDN base URL where CloudFormation templates are hosted.
+    # Defaults to MEEZI_CFN_TEMPLATE_S3_BASE_URL; override via FPTNEXT_CF_TEMPLATE_BASE_URL.
+    # Must be an S3 URL — the CloudFormation console rejects non-S3 templateURL values.
+    cf_template_base_url: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -163,6 +183,8 @@ class Settings:
             ses_aws_secret_access_key=ses_aws_secret_access_key,
             frontend_url=frontend_url,
             api_public_url=api_public_url,
+            platform_aws_account_id=os.getenv("FPTNEXT_PLATFORM_AWS_ACCOUNT_ID", "").strip() or MEEZI_PLATFORM_AWS_ACCOUNT_ID,
+            cf_template_base_url=os.getenv("FPTNEXT_CF_TEMPLATE_BASE_URL", "").strip() or MEEZI_CFN_TEMPLATE_S3_BASE_URL,
         )
 
 

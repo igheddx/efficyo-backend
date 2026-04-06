@@ -15,6 +15,9 @@ class NotificationRead(BaseModel):
     entity_id: Optional[UUID] = None
     payload: Optional[dict[str, Any]] = None
     is_read: bool
+    read_at: datetime | None = None
+    is_acknowledged: bool = False
+    acknowledged_at: datetime | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -29,6 +32,12 @@ class NotificationsPageRead(BaseModel):
 class MarkReadResponse(BaseModel):
     id: UUID
     is_read: bool
+
+
+class AcknowledgeResponse(BaseModel):
+    id: UUID
+    is_read: bool
+    is_acknowledged: bool
 
 
 class MarkAllReadResponse(BaseModel):

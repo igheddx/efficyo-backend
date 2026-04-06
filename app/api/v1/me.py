@@ -16,6 +16,10 @@ from app.schemas.me import (
     TenantSummary,
     UserPreferencesPatch,
 )
+from app.schemas.user_notification_destination import (
+    UserNotificationDestinationPatch,
+    UserNotificationDestinationRead,
+)
 from app.services import (
     access_resolution_service,
     attention_tasks_service,
@@ -133,6 +137,28 @@ def patch_me_preferences(
     return me_service.patch_user_preferences(
         db_session, user_ctx, receive_approval_emails=body.receive_approval_emails
     )
+
+
+@router.get("/notification-destination", response_model=UserNotificationDestinationRead)
+def get_my_notification_destination(
+    organization_id: UUID = Query(...),
+    db_session: Session = Depends(get_db),
+    user_ctx: UserContext = Depends(get_user_context),
+) -> UserNotificationDestinationRead:
+    return me_service.get_my_notification_destination(
+        db_session,
+        user_ctx,
+        organization_id=organization_id,
+    )
+
+
+@router.patch("/notification-destination", response_model=UserNotificationDestinationRead)
+def patch_my_notification_destination(
+    body: UserNotificationDestinationPatch,
+    db_session: Session = Depends(get_db),
+    user_ctx: UserContext = Depends(get_user_context),
+) -> UserNotificationDestinationRead:
+    return me_service.patch_my_notification_destination(db_session, user_ctx, body)
 
 
 @router.get("/tasks", response_model=AttentionTasksResponse)

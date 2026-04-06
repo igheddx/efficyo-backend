@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.user_context import UserContext, get_user_context
 from app.schemas.notification import (
+    AcknowledgeResponse,
     MarkAllReadResponse,
     MarkReadResponse,
     NotificationRead,
@@ -102,3 +103,22 @@ def mark_all_notifications_read(
         organization_id=org_id,
     )
     return MarkAllReadResponse(updated=n)
+
+
+@router.post("/{notification_id}/ack", response_model=AcknowledgeResponse)
+def acknowledge_notification_endpoint(
+    notification_id: UUID,
+    db_session: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_user_context),
+) -> AcknowledgeResponse:
+    user_id = _require_notification_user(db_session, ctx)
+    org_id = tenant_scope_service.require_data_access_organization_id(db_session, ctx)
+    row = notification_service.acknowledge_notification(
+        db_session,
+        notification_id=notification_id,
+        user_id=user_id,
+        organization_id=org_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+    return AcknowledgeResponse(id=row.id, is_read=row.is_read, is_acknowledged=row.is_acknowledged)

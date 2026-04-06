@@ -142,6 +142,9 @@ def create_notification(
         entity_id=entity_id,
         payload=payload,
         is_read=False,
+        read_at=None,
+        is_acknowledged=False,
+        acknowledged_at=None,
         created_at=utc_now(),
     )
     db.add(row)
@@ -519,6 +522,7 @@ def mark_notification_read(
     if row is None:
         return None
     row.is_read = True
+    row.read_at = utc_now()
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -543,11 +547,41 @@ def mark_all_read(
     n = 0
     for row in q:
         row.is_read = True
+        row.read_at = utc_now()
         db.add(row)
         n += 1
     if n:
         db.commit()
     return n
+
+
+def acknowledge_notification(
+    db: Session,
+    *,
+    notification_id: UUID,
+    user_id: UUID,
+    organization_id: UUID,
+) -> Notification | None:
+    row = (
+        db.query(Notification)
+        .filter(
+            Notification.id == notification_id,
+            Notification.user_id == user_id,
+            Notification.organization_id == organization_id,
+        )
+        .first()
+    )
+    if row is None:
+        return None
+    if not row.is_read:
+        row.is_read = True
+        row.read_at = utc_now()
+    row.is_acknowledged = True
+    row.acknowledged_at = utc_now()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 def recommendation_summary(db: Session, tenant_id: UUID, cloud_account_id: UUID, recommendation_id: UUID) -> str:

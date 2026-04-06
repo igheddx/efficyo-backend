@@ -28,4 +28,7 @@ class Notification(Base):
     entity_id = Column(UUID(as_uuid=True), nullable=True, index=True)
     payload = Column(JSONB().with_variant(JSON(), "sqlite"), nullable=True)
     is_read = Column(Boolean, nullable=False, default=False, index=True)
+    read_at = Column(DateTime(timezone=True), nullable=True)
+    is_acknowledged = Column(Boolean, nullable=False, default=False, index=True)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
