@@ -135,6 +135,8 @@ def _min_access_for_cloud_route(request: Request) -> str | None:
         return "admin"
     if path.endswith("/snooze") or path.endswith("/dismiss") or path.endswith("/reactivate"):
         return "admin"
+    if method == "DELETE":
+        return "admin"
     return "viewer"
 
 
@@ -303,6 +305,19 @@ def get_cloud_account_endpoint(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cloud account not found")
 
     return CloudAccountRead.model_validate(cloud_account)
+
+
+@router.delete(
+    "/{cloud_account_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Permanently delete a cloud account and all its ingested data and approvals",
+)
+def delete_cloud_account_endpoint(
+    tenant_id: UUID,
+    cloud_account_id: UUID,
+    db_session: Session = Depends(get_db),
+) -> None:
+    cloud_account_reset_service.delete_cloud_account(db_session, tenant_id, cloud_account_id)
 
 
 @router.post("/{cloud_account_id}/validate", response_model=CloudAccountValidationRead, status_code=status.HTTP_200_OK)

@@ -33,6 +33,7 @@ from app.services.root import (
     resource_coverage_service,
     users_service,
 )
+from app.services import organization_delete_service
 
 router = APIRouter(prefix="/root", tags=["root-admin"])
 
@@ -251,3 +252,16 @@ def root_patch_user_status(
     return RootUserDetail.model_validate(
         users_service.patch_root_user_status(db_session, user_id, new_status=body.status)
     )
+
+
+@router.delete(
+    "/organizations/{org_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Permanently delete an organization and all its data (root kill-switch)",
+)
+def root_delete_organization(
+    org_id: UUID,
+    db_session: Session = Depends(get_db),
+    _ctx: UserContext = Depends(require_platform_root),
+) -> None:
+    organization_delete_service.delete_organization(db_session, org_id)
