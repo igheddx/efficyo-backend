@@ -1148,6 +1148,50 @@ def detect_extended_findings(
                 )
             )
 
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "kms_key"):
+        cfg = snapshot.configuration_json or {}
+        if cfg.get("rotation_enabled") is False:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="kms_key_rotation_disabled",
+                    severity="medium",
+                    evidence_json={
+                        "key_state": cfg.get("key_state"),
+                        "key_spec": cfg.get("key_spec"),
+                        "rotation_enabled": False,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
+    for snapshot in _latest_snapshots(db_session, tenant_id, cloud_account_id, "cloudwatch_log_group"):
+        cfg = snapshot.configuration_json or {}
+        retention = cfg.get("retention_in_days")
+        if retention is None:
+            findings.append(
+                Finding(
+                    tenant_id=tenant_id,
+                    cloud_account_id=cloud_account_id,
+                    resource_snapshot_id=snapshot.id,
+                    resource_id=snapshot.resource_id,
+                    resource_type=snapshot.resource_type,
+                    finding_type="cloudwatch_log_group_no_retention_policy",
+                    severity="low",
+                    evidence_json={
+                        "log_group_name": cfg.get("log_group_name"),
+                        "retention_in_days": retention,
+                    },
+                    detected_at=detected_at,
+                    sync_run_id=sync_run_id,
+                )
+            )
+
         if general_log_enabled:
             findings.append(
                 Finding(

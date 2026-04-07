@@ -48,6 +48,23 @@ def _resource_envelope(
     }
 
 
+def _normalize_tags_any(raw_tags: Any) -> dict[str, str]:
+    """Normalize tags from AWS services that emit either map or list formats."""
+    if isinstance(raw_tags, dict):
+        return {str(k): str(v) for k, v in raw_tags.items() if str(k).strip()}
+
+    tags: dict[str, str] = {}
+    for tag in raw_tags or []:
+        if not isinstance(tag, dict):
+            continue
+        key = str(tag.get("Key") or tag.get("key") or tag.get("TagKey") or "").strip()
+        if not key:
+            continue
+        value = str(tag.get("Value") or tag.get("value") or tag.get("TagValue") or "")
+        tags[key] = value
+    return tags
+
+
 def _is_world_open(ip_ranges: list[dict] | None, ipv6_ranges: list[dict] | None) -> bool:
     for r in ip_ranges or []:
         if str((r or {}).get("CidrIp") or "").strip() == "0.0.0.0/0":
@@ -1184,6 +1201,654 @@ def fetch_rds_parameter_groups(role_arn: str, home_region: str, external_id: str
     )
 
 
+def _ecs_clusters_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ecs = _create_assumed_client("ecs", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = ecs.get_paginator("list_clusters")
+    for page in paginator.paginate():
+        arns = [str(x) for x in page.get("clusterArns", []) or [] if x]
+        for i in range(0, len(arns), 100):
+            chunk = arns[i : i + 100]
+            try:
+                resp = ecs.describe_clusters(clusters=chunk, include=["TAGS"])
+            except (ClientError, BotoCoreError):
+                resp = ecs.describe_clusters(clusters=chunk)
+            for c in resp.get("clusters", []) or []:
+                cluster_arn = str(c.get("clusterArn") or "").strip()
+                cluster_name = str(c.get("clusterName") or "").strip()
+                if not cluster_arn and not cluster_name:
+                    continue
+                out.append(
+                    _resource_envelope(
+                        resource_id=cluster_arn or cluster_name,
+                        resource_type="ecs_cluster",
+                        region=region,
+                        configuration_json={
+                            "cluster_name": cluster_name,
+                            "status": c.get("status"),
+                            "running_tasks_count": int(c.get("runningTasksCount") or 0),
+                            "pending_tasks_count": int(c.get("pendingTasksCount") or 0),
+                            "active_services_count": int(c.get("activeServicesCount") or 0),
+                            "registered_container_instances_count": int(c.get("registeredContainerInstancesCount") or 0),
+                            "capacity_providers": list(c.get("capacityProviders") or []),
+                        },
+                        tags_json=_normalize_tags_any(c.get("tags") or []),
+                    )
+                )
+    return out
+
+
+def fetch_ecs_clusters(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _ecs_clusters_one_region(role_arn, r, external_id),
+        "ECSClusters",
+        external_id=external_id,
+    )
+
+
+def _ecs_services_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ecs = _create_assumed_client("ecs", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    cluster_paginator = ecs.get_paginator("list_clusters")
+    for page in cluster_paginator.paginate():
+        cluster_arns = [str(x) for x in page.get("clusterArns", []) or [] if x]
+        for cluster_arn in cluster_arns:
+            svc_paginator = ecs.get_paginator("list_services")
+            for svc_page in svc_paginator.paginate(cluster=cluster_arn):
+                service_arns = [str(x) for x in svc_page.get("serviceArns", []) or [] if x]
+                for i in range(0, len(service_arns), 10):
+                    chunk = service_arns[i : i + 10]
+                    try:
+                        resp = ecs.describe_services(cluster=cluster_arn, services=chunk, include=["TAGS"])
+                    except (ClientError, BotoCoreError):
+                        resp = ecs.describe_services(cluster=cluster_arn, services=chunk)
+                    for s in resp.get("services", []) or []:
+                        service_arn = str(s.get("serviceArn") or "").strip()
+                        service_name = str(s.get("serviceName") or "").strip()
+                        if not service_arn and not service_name:
+                            continue
+                        out.append(
+                            _resource_envelope(
+                                resource_id=service_arn or service_name,
+                                resource_type="ecs_service",
+                                region=region,
+                                configuration_json={
+                                    "cluster_arn": cluster_arn,
+                                    "service_name": service_name,
+                                    "status": s.get("status"),
+                                    "launch_type": s.get("launchType"),
+                                    "scheduling_strategy": s.get("schedulingStrategy"),
+                                    "platform_version": s.get("platformVersion"),
+                                    "desired_count": int(s.get("desiredCount") or 0),
+                                    "running_count": int(s.get("runningCount") or 0),
+                                    "pending_count": int(s.get("pendingCount") or 0),
+                                    "enable_execute_command": bool(s.get("enableExecuteCommand")),
+                                    "task_definition": s.get("taskDefinition"),
+                                },
+                                tags_json=_normalize_tags_any(s.get("tags") or []),
+                            )
+                        )
+    return out
+
+
+def fetch_ecs_services(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _ecs_services_one_region(role_arn, r, external_id),
+        "ECSServices",
+        external_id=external_id,
+    )
+
+
+def _eks_clusters_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    eks = _create_assumed_client("eks", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = eks.get_paginator("list_clusters")
+    for page in paginator.paginate():
+        for name in page.get("clusters", []) or []:
+            try:
+                cluster = (eks.describe_cluster(name=name) or {}).get("cluster") or {}
+            except (ClientError, BotoCoreError):
+                continue
+            arn = str(cluster.get("arn") or name)
+            vpc_cfg = cluster.get("resourcesVpcConfig") or {}
+            logging_cfg = cluster.get("logging") or {}
+            enabled_types = [
+                str(entry.get("types") or [])
+                for entry in logging_cfg.get("clusterLogging", []) or []
+                if bool(entry.get("enabled"))
+            ]
+            out.append(
+                _resource_envelope(
+                    resource_id=arn,
+                    resource_type="eks_cluster",
+                    region=region,
+                    configuration_json={
+                        "cluster_name": cluster.get("name") or name,
+                        "status": cluster.get("status"),
+                        "version": cluster.get("version"),
+                        "platform_version": cluster.get("platformVersion"),
+                        "endpoint": cluster.get("endpoint"),
+                        "endpoint_public_access": bool(vpc_cfg.get("endpointPublicAccess")),
+                        "endpoint_private_access": bool(vpc_cfg.get("endpointPrivateAccess")),
+                        "logging_enabled_types": enabled_types,
+                    },
+                    tags_json=_normalize_tags_any(cluster.get("tags") or {}),
+                )
+            )
+    return out
+
+
+def fetch_eks_clusters(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _eks_clusters_one_region(role_arn, r, external_id),
+        "EKSClusters",
+        external_id=external_id,
+    )
+
+
+def _elasticache_clusters_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ec = _create_assumed_client("elasticache", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = ec.get_paginator("describe_cache_clusters")
+    for page in paginator.paginate(ShowCacheNodeInfo=False):
+        for cluster in page.get("CacheClusters", []) or []:
+            cluster_id = str(cluster.get("CacheClusterId") or "").strip()
+            if not cluster_id:
+                continue
+            arn = str(cluster.get("ARN") or "").strip()
+            tags: dict[str, str] = {}
+            if arn:
+                try:
+                    tags = _normalize_tags_any((ec.list_tags_for_resource(ResourceName=arn) or {}).get("TagList") or [])
+                except (ClientError, BotoCoreError):
+                    tags = {}
+            out.append(
+                _resource_envelope(
+                    resource_id=cluster_id,
+                    resource_type="elasticache_cluster",
+                    region=region,
+                    configuration_json={
+                        "arn": arn,
+                        "engine": cluster.get("Engine"),
+                        "engine_version": cluster.get("EngineVersion"),
+                        "cache_node_type": cluster.get("CacheNodeType"),
+                        "cache_cluster_status": cluster.get("CacheClusterStatus"),
+                        "num_cache_nodes": int(cluster.get("NumCacheNodes") or 0),
+                        "at_rest_encryption_enabled": bool(cluster.get("AtRestEncryptionEnabled")),
+                        "transit_encryption_enabled": bool(cluster.get("TransitEncryptionEnabled")),
+                        "snapshot_retention_limit": int(cluster.get("SnapshotRetentionLimit") or 0),
+                    },
+                    tags_json=tags,
+                )
+            )
+    return out
+
+
+def fetch_elasticache_clusters(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _elasticache_clusters_one_region(role_arn, r, external_id),
+        "ElastiCacheClusters",
+        external_id=external_id,
+    )
+
+
+def _redshift_clusters_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    redshift = _create_assumed_client("redshift", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = redshift.get_paginator("describe_clusters")
+    for page in paginator.paginate():
+        for cluster in page.get("Clusters", []) or []:
+            cid = str(cluster.get("ClusterIdentifier") or "").strip()
+            if not cid:
+                continue
+            out.append(
+                _resource_envelope(
+                    resource_id=cid,
+                    resource_type="redshift_cluster",
+                    region=region,
+                    configuration_json={
+                        "cluster_status": cluster.get("ClusterStatus"),
+                        "node_type": cluster.get("NodeType"),
+                        "number_of_nodes": int(cluster.get("NumberOfNodes") or 0),
+                        "encrypted": bool(cluster.get("Encrypted")),
+                        "publicly_accessible": bool(cluster.get("PubliclyAccessible")),
+                        "enhanced_vpc_routing": bool(cluster.get("EnhancedVpcRouting")),
+                        "automated_snapshot_retention_period": int(cluster.get("AutomatedSnapshotRetentionPeriod") or 0),
+                        "cluster_namespace_arn": cluster.get("ClusterNamespaceArn"),
+                    },
+                    tags_json=_normalize_tags_any(cluster.get("Tags") or []),
+                )
+            )
+    return out
+
+
+def fetch_redshift_clusters(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _redshift_clusters_one_region(role_arn, r, external_id),
+        "RedshiftClusters",
+        external_id=external_id,
+    )
+
+
+def _opensearch_domains_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    os_client = _create_assumed_client("opensearch", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    names = (os_client.list_domain_names() or {}).get("DomainNames") or []
+    for row in names:
+        domain_name = str((row or {}).get("DomainName") or "").strip()
+        if not domain_name:
+            continue
+        try:
+            status = (os_client.describe_domain(DomainName=domain_name) or {}).get("DomainStatus") or {}
+        except (ClientError, BotoCoreError):
+            continue
+        arn = str(status.get("ARN") or domain_name)
+        tags: dict[str, str] = {}
+        try:
+            tags = _normalize_tags_any((os_client.list_tags(ARN=arn) or {}).get("TagList") or [])
+        except (ClientError, BotoCoreError):
+            tags = {}
+        cluster_cfg = status.get("ClusterConfig") or {}
+        out.append(
+            _resource_envelope(
+                resource_id=arn,
+                resource_type="opensearch_domain",
+                region=region,
+                configuration_json={
+                    "domain_name": status.get("DomainName") or domain_name,
+                    "engine_version": status.get("EngineVersion"),
+                    "processing": bool(status.get("Processing")),
+                    "created": bool(status.get("Created")),
+                    "deleted": bool(status.get("Deleted")),
+                    "encryption_at_rest_enabled": bool((status.get("EncryptionAtRestOptions") or {}).get("Enabled")),
+                    "node_to_node_encryption_enabled": bool((status.get("NodeToNodeEncryptionOptions") or {}).get("Enabled")),
+                    "enforce_https": bool((status.get("DomainEndpointOptions") or {}).get("EnforceHTTPS")),
+                    "instance_type": cluster_cfg.get("InstanceType"),
+                    "instance_count": int(cluster_cfg.get("InstanceCount") or 0),
+                },
+                tags_json=tags,
+            )
+        )
+    return out
+
+
+def fetch_opensearch_domains(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _opensearch_domains_one_region(role_arn, r, external_id),
+        "OpenSearchDomains",
+        external_id=external_id,
+    )
+
+
+def _sqs_queues_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    sqs = _create_assumed_client("sqs", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    next_token: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {"MaxResults": 1000}
+        if next_token:
+            kwargs["NextToken"] = next_token
+        resp = sqs.list_queues(**kwargs)
+        queue_urls = [str(x) for x in (resp.get("QueueUrls") or []) if x]
+        for queue_url in queue_urls:
+            attrs = (
+                sqs.get_queue_attributes(
+                    QueueUrl=queue_url,
+                    AttributeNames=[
+                        "QueueArn",
+                        "VisibilityTimeout",
+                        "MessageRetentionPeriod",
+                        "KmsMasterKeyId",
+                        "KmsDataKeyReusePeriodSeconds",
+                        "SqsManagedSseEnabled",
+                    ],
+                )
+                or {}
+            ).get("Attributes") or {}
+            tags = _normalize_tags_any((sqs.list_queue_tags(QueueUrl=queue_url) or {}).get("Tags") or {})
+            arn = str(attrs.get("QueueArn") or queue_url)
+            out.append(
+                _resource_envelope(
+                    resource_id=arn,
+                    resource_type="sqs_queue",
+                    region=region,
+                    configuration_json={
+                        "queue_url": queue_url,
+                        "queue_name": arn.rsplit(":", 1)[-1] if arn.startswith("arn:") else queue_url.rsplit("/", 1)[-1],
+                        "visibility_timeout": int(attrs.get("VisibilityTimeout") or 0),
+                        "message_retention_period": int(attrs.get("MessageRetentionPeriod") or 0),
+                        "kms_master_key_id": attrs.get("KmsMasterKeyId"),
+                        "kms_data_key_reuse_period_seconds": int(attrs.get("KmsDataKeyReusePeriodSeconds") or 0),
+                        "sqs_managed_sse_enabled": str(attrs.get("SqsManagedSseEnabled") or "").lower() == "true",
+                    },
+                    tags_json=tags,
+                )
+            )
+        next_token = str(resp.get("NextToken") or "").strip() or None
+        if not next_token:
+            break
+    return out
+
+
+def fetch_sqs_queues(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _sqs_queues_one_region(role_arn, r, external_id),
+        "SQSQueues",
+        external_id=external_id,
+    )
+
+
+def _sns_topics_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    sns = _create_assumed_client("sns", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = sns.get_paginator("list_topics")
+    for page in paginator.paginate():
+        for topic in page.get("Topics", []) or []:
+            arn = str((topic or {}).get("TopicArn") or "").strip()
+            if not arn:
+                continue
+            attrs = (sns.get_topic_attributes(TopicArn=arn) or {}).get("Attributes") or {}
+            tags = _normalize_tags_any((sns.list_tags_for_resource(ResourceArn=arn) or {}).get("Tags") or [])
+            out.append(
+                _resource_envelope(
+                    resource_id=arn,
+                    resource_type="sns_topic",
+                    region=region,
+                    configuration_json={
+                        "display_name": attrs.get("DisplayName"),
+                        "owner": attrs.get("Owner"),
+                        "fifo_topic": str(attrs.get("FifoTopic") or "").lower() == "true",
+                        "kms_master_key_id": attrs.get("KmsMasterKeyId"),
+                        "subscriptions_confirmed": int(attrs.get("SubscriptionsConfirmed") or 0),
+                        "subscriptions_pending": int(attrs.get("SubscriptionsPending") or 0),
+                    },
+                    tags_json=tags,
+                )
+            )
+    return out
+
+
+def fetch_sns_topics(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _sns_topics_one_region(role_arn, r, external_id),
+        "SNSTopics",
+        external_id=external_id,
+    )
+
+
+def _kinesis_streams_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    kinesis = _create_assumed_client("kinesis", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = kinesis.get_paginator("list_streams")
+    for page in paginator.paginate():
+        for stream_name in page.get("StreamNames", []) or []:
+            try:
+                summary = (kinesis.describe_stream_summary(StreamName=stream_name) or {}).get("StreamDescriptionSummary") or {}
+            except (ClientError, BotoCoreError):
+                continue
+            try:
+                tags = _normalize_tags_any((kinesis.list_tags_for_stream(StreamName=stream_name) or {}).get("Tags") or [])
+            except (ClientError, BotoCoreError):
+                tags = {}
+            out.append(
+                _resource_envelope(
+                    resource_id=str(summary.get("StreamARN") or stream_name),
+                    resource_type="kinesis_stream",
+                    region=region,
+                    configuration_json={
+                        "stream_name": stream_name,
+                        "stream_status": summary.get("StreamStatus"),
+                        "open_shard_count": int(summary.get("OpenShardCount") or 0),
+                        "retention_period_hours": int(summary.get("RetentionPeriodHours") or 0),
+                        "encryption_type": summary.get("EncryptionType"),
+                        "key_id": summary.get("KeyId"),
+                        "stream_mode": (summary.get("StreamModeDetails") or {}).get("StreamMode"),
+                    },
+                    tags_json=tags,
+                )
+            )
+    return out
+
+
+def fetch_kinesis_streams(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _kinesis_streams_one_region(role_arn, r, external_id),
+        "KinesisStreams",
+        external_id=external_id,
+    )
+
+
+def _dynamodb_tables_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    ddb = _create_assumed_client("dynamodb", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = ddb.get_paginator("list_tables")
+    for page in paginator.paginate():
+        for table_name in page.get("TableNames", []) or []:
+            try:
+                table = (ddb.describe_table(TableName=table_name) or {}).get("Table") or {}
+            except (ClientError, BotoCoreError):
+                continue
+            table_arn = str(table.get("TableArn") or table_name)
+            try:
+                tags = _normalize_tags_any((ddb.list_tags_of_resource(ResourceArn=table_arn) or {}).get("Tags") or [])
+            except (ClientError, BotoCoreError):
+                tags = {}
+            pitr_enabled: bool | None = None
+            try:
+                pitr = (ddb.describe_continuous_backups(TableName=table_name) or {}).get("ContinuousBackupsDescription") or {}
+                pitr_enabled = (
+                    str(((pitr.get("PointInTimeRecoveryDescription") or {}).get("PointInTimeRecoveryStatus") or "")).upper()
+                    == "ENABLED"
+                )
+            except (ClientError, BotoCoreError):
+                pitr_enabled = None
+            throughput = table.get("ProvisionedThroughput") or {}
+            out.append(
+                _resource_envelope(
+                    resource_id=table_arn,
+                    resource_type="dynamodb_table",
+                    region=region,
+                    configuration_json={
+                        "table_name": table.get("TableName") or table_name,
+                        "table_status": table.get("TableStatus"),
+                        "billing_mode": (table.get("BillingModeSummary") or {}).get("BillingMode"),
+                        "provisioned_read_capacity_units": int(throughput.get("ReadCapacityUnits") or 0),
+                        "provisioned_write_capacity_units": int(throughput.get("WriteCapacityUnits") or 0),
+                        "pitr_enabled": pitr_enabled,
+                        "sse_status": ((table.get("SSEDescription") or {}).get("Status") or ""),
+                    },
+                    tags_json=tags,
+                )
+            )
+    return out
+
+
+def fetch_dynamodb_tables(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _dynamodb_tables_one_region(role_arn, r, external_id),
+        "DynamoDBTables",
+        external_id=external_id,
+    )
+
+
+def _kms_keys_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    kms = _create_assumed_client("kms", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = kms.get_paginator("list_keys")
+    for page in paginator.paginate():
+        for key in page.get("Keys", []) or []:
+            key_id = str((key or {}).get("KeyId") or "").strip()
+            if not key_id:
+                continue
+            try:
+                metadata = (kms.describe_key(KeyId=key_id) or {}).get("KeyMetadata") or {}
+            except (ClientError, BotoCoreError):
+                continue
+            key_arn = str(metadata.get("Arn") or key_id)
+            try:
+                rotation_enabled = bool((kms.get_key_rotation_status(KeyId=key_id) or {}).get("KeyRotationEnabled"))
+            except (ClientError, BotoCoreError):
+                rotation_enabled = None
+            try:
+                tags = _normalize_tags_any((kms.list_resource_tags(KeyId=key_id) or {}).get("Tags") or [])
+            except (ClientError, BotoCoreError):
+                tags = {}
+            out.append(
+                _resource_envelope(
+                    resource_id=key_arn,
+                    resource_type="kms_key",
+                    region=region,
+                    configuration_json={
+                        "key_id": key_id,
+                        "key_state": metadata.get("KeyState"),
+                        "key_usage": metadata.get("KeyUsage"),
+                        "key_spec": metadata.get("KeySpec"),
+                        "key_manager": metadata.get("KeyManager"),
+                        "multi_region": bool(metadata.get("MultiRegion")),
+                        "enabled": bool(metadata.get("Enabled")),
+                        "rotation_enabled": rotation_enabled,
+                    },
+                    tags_json=tags,
+                )
+            )
+    return out
+
+
+def fetch_kms_keys(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _kms_keys_one_region(role_arn, r, external_id),
+        "KMSKeys",
+        external_id=external_id,
+    )
+
+
+def _cloudwatch_log_groups_one_region(role_arn: str, region: str, external_id: str | None = None) -> list[dict]:
+    logs = _create_assumed_client("logs", role_arn, region, external_id=external_id)
+    out: list[dict] = []
+    paginator = logs.get_paginator("describe_log_groups")
+    for page in paginator.paginate():
+        for lg in page.get("logGroups", []) or []:
+            name = str(lg.get("logGroupName") or "").strip()
+            if not name:
+                continue
+            arn = str(lg.get("arn") or name)
+            try:
+                tags = _normalize_tags_any((logs.list_tags_log_group(logGroupName=name) or {}).get("tags") or {})
+            except (ClientError, BotoCoreError):
+                tags = {}
+            out.append(
+                _resource_envelope(
+                    resource_id=arn,
+                    resource_type="cloudwatch_log_group",
+                    region=region,
+                    configuration_json={
+                        "log_group_name": name,
+                        "retention_in_days": lg.get("retentionInDays"),
+                        "stored_bytes": int(lg.get("storedBytes") or 0),
+                        "metric_filter_count": int(lg.get("metricFilterCount") or 0),
+                        "kms_key_id": lg.get("kmsKeyId"),
+                    },
+                    tags_json=tags,
+                )
+            )
+    return out
+
+
+def fetch_cloudwatch_log_groups(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    return _gather_per_region(
+        role_arn,
+        home_region,
+        lambda r: _cloudwatch_log_groups_one_region(role_arn, r, external_id),
+        "CloudWatchLogGroups",
+        external_id=external_id,
+    )
+
+
+def fetch_iam_roles(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    iam = _create_assumed_client("iam", role_arn, home_region, external_id=external_id)
+    out: list[dict] = []
+    paginator = iam.get_paginator("list_roles")
+    for page in paginator.paginate():
+        for role in page.get("Roles", []) or []:
+            arn = str(role.get("Arn") or "").strip()
+            name = str(role.get("RoleName") or "").strip()
+            if not arn and not name:
+                continue
+            out.append(
+                _resource_envelope(
+                    resource_id=arn or name,
+                    resource_type="iam_role",
+                    region="global",
+                    configuration_json={
+                        "role_name": name,
+                        "path": role.get("Path"),
+                        "max_session_duration": int(role.get("MaxSessionDuration") or 0),
+                        "description": role.get("Description"),
+                        "create_date": (role.get("CreateDate").isoformat() if role.get("CreateDate") else None),
+                    },
+                    tags_json=_normalize_tags_any(role.get("Tags") or []),
+                )
+            )
+    return out
+
+
+def fetch_iam_users(role_arn: str, home_region: str, external_id: str | None = None) -> list[dict]:
+    iam = _create_assumed_client("iam", role_arn, home_region, external_id=external_id)
+    out: list[dict] = []
+    paginator = iam.get_paginator("list_users")
+    for page in paginator.paginate():
+        for user in page.get("Users", []) or []:
+            arn = str(user.get("Arn") or "").strip()
+            name = str(user.get("UserName") or "").strip()
+            if not arn and not name:
+                continue
+            tags: dict[str, str] = {}
+            if name:
+                try:
+                    tags = _normalize_tags_any((iam.list_user_tags(UserName=name) or {}).get("Tags") or [])
+                except (ClientError, BotoCoreError):
+                    tags = {}
+            out.append(
+                _resource_envelope(
+                    resource_id=arn or name,
+                    resource_type="iam_user",
+                    region="global",
+                    configuration_json={
+                        "user_name": name,
+                        "path": user.get("Path"),
+                        "password_last_used": (
+                            user.get("PasswordLastUsed").isoformat() if user.get("PasswordLastUsed") else None
+                        ),
+                        "create_date": (user.get("CreateDate").isoformat() if user.get("CreateDate") else None),
+                    },
+                    tags_json=tags,
+                )
+            )
+    return out
+
+
 def fetch_all_extended(role_arn: str, home_region: str, external_id: str | None = None) -> dict[str, list[dict]]:
     """Return keyed batches for observability (each value is a list of snapshot dicts)."""
     batches = {
@@ -1203,6 +1868,20 @@ def fetch_all_extended(role_arn: str, home_region: str, external_id: str | None 
         "internet_gateway": fetch_internet_gateways(role_arn, home_region, external_id),
         "security_group": fetch_security_groups(role_arn, home_region, external_id),
         "rds_parameter_group": fetch_rds_parameter_groups(role_arn, home_region, external_id),
+        "ecs_cluster": fetch_ecs_clusters(role_arn, home_region, external_id),
+        "ecs_service": fetch_ecs_services(role_arn, home_region, external_id),
+        "eks_cluster": fetch_eks_clusters(role_arn, home_region, external_id),
+        "elasticache_cluster": fetch_elasticache_clusters(role_arn, home_region, external_id),
+        "redshift_cluster": fetch_redshift_clusters(role_arn, home_region, external_id),
+        "opensearch_domain": fetch_opensearch_domains(role_arn, home_region, external_id),
+        "sqs_queue": fetch_sqs_queues(role_arn, home_region, external_id),
+        "sns_topic": fetch_sns_topics(role_arn, home_region, external_id),
+        "kinesis_stream": fetch_kinesis_streams(role_arn, home_region, external_id),
+        "dynamodb_table": fetch_dynamodb_tables(role_arn, home_region, external_id),
+        "kms_key": fetch_kms_keys(role_arn, home_region, external_id),
+        "cloudwatch_log_group": fetch_cloudwatch_log_groups(role_arn, home_region, external_id),
+        "iam_role": fetch_iam_roles(role_arn, home_region, external_id),
+        "iam_user": fetch_iam_users(role_arn, home_region, external_id),
     }
     _link_cloudfront_to_acm(batches)
     return batches
