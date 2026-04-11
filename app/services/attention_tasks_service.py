@@ -11,7 +11,6 @@ from app.services.copilot_context_service import (
     _enrich_approvals_preflight_dryrun,
     _enrich_execution_eligibility,
     _failed_execution_signals,
-    _failed_sync_jobs,
     _pending_approvals_list,
     _ready_to_execute_list,
     _rejected_approval_requests,
@@ -20,7 +19,6 @@ from app.services.copilot_context_service import (
 
 BLOCKER_ITEM_KINDS = frozenset(
     {
-        "failed_sync",
         "failed_execution",
         "approval_partial",
         "approval_rejected",
@@ -37,25 +35,11 @@ def _gather_raw_candidates(
 ) -> list[dict]:
     candidates: list[dict] = []
 
-    for j in _failed_sync_jobs(db, tenant_id, cloud_account_id, 15):
-        candidates.append(
-            {
-                "kind": "failed_sync",
-                "title": f"Failed sync ({j.get('job_type') or 'ingest'})",
-                "entity_type": "sync_job",
-                "entity_id": j["sync_job_id"],
-                "recommendation_id": None,
-                "estimated_monthly_savings": None,
-                "risk_level": None,
-                "preflight_status": None,
-                "status": None,
-                "execution_eligible": None,
-                "blocking_reason": None,
-                "error_message": j.get("error_message"),
-                "execution_notes_excerpt": None,
-                "anchor_iso": j.get("created_at") or j.get("completed_at"),
-            }
-        )
+    # NOTE: failed_sync is intentionally excluded here.
+    # Sync failures are a Meezi infrastructure issue, not an AWS resource
+    # optimization opportunity. They are already surfaced in the sync history
+    # panel (WorkspaceContextSettings). Including them in "Top attention"
+    # alongside resource opportunities is misleading and pollutes the ranking.
 
     for row in _failed_execution_signals(db, tenant_id, cloud_account_id, 15):
         candidates.append(
