@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 import logging
 import re
 from uuid import UUID
@@ -67,6 +68,20 @@ _DISMISS_REASONS = {
     "false_positive",
     "other",
 }
+
+# Aurora Serverless service-floor constants
+# Aurora Serverless v2 minimum is 0.5 ACU; v1 minimum is 1 ACU.
+AURORA_SERVERLESS_V2_FLOOR_ACU: float = 0.5
+AURORA_SERVERLESS_V1_FLOOR_ACU: float = 1.0
+
+# DB recommendation classification values
+DB_CLASSIFICATION_IMMEDIATE_RIGHTSIZE = "immediate_rightsize"
+DB_CLASSIFICATION_SERVICE_FLOOR_REACHED = "service_floor_reached"
+DB_CLASSIFICATION_ALT_ARCH_REVIEW = "alternative_architecture_review"
+DB_CLASSIFICATION_LOW_VALUE = "low_value_not_recommended"
+
+# Below this estimated monthly savings, an alternative-architecture migration is not worth surfacing.
+AURORA_ALT_ARCH_MIN_MONTHLY_SAVINGS_THRESHOLD: Decimal = Decimal("50.00")
 
 
 @dataclass
@@ -704,6 +719,7 @@ def recommendation_read_from_orm(
         evidence_json=payload_evidence or None,
         safe_to_apply=rec.safe_to_apply,
         caution_note=rec.caution_note,
+        recommendation_classification=getattr(rec, "recommendation_classification", None),
     )
 
 
@@ -775,6 +791,108 @@ def _aurora_serverless_explanation(finding: Finding) -> str:
     else:
         driver = "This database is a major cost driver."
     return f"{driver} Serverless scaling may be higher than needed for current workload."
+
+
+def _classify_aurora_serverless(evidence: dict, estimated_savings: Decimal | None) -> dict:
+    """
+    Classify an Aurora Serverless finding and return a dict with wording/metadata fields.
+
+    Returns: {
+        "classification": str,
+        "suppress": bool,          # True → return None from handler (auto-resolve any existing rec)
+        "summary": str,
+        "explanation": str,
+        "recommended_action": str,
+        "safe_to_apply": bool,
+        "caution_note": str,
+    }
+    """
+    sv2_scaling = evidence.get("serverless_v2_scaling") or {}
+    v1_scaling = evidence.get("scaling_configuration") or {}
+
+    # Determine min capacity and which floor applies.
+    min_capacity_raw = sv2_scaling.get("MinCapacity") or sv2_scaling.get("min_capacity")
+    if min_capacity_raw is not None:
+        floor = AURORA_SERVERLESS_V2_FLOOR_ACU
+    else:
+        min_capacity_raw = v1_scaling.get("MinCapacity") or v1_scaling.get("min_capacity")
+        floor = AURORA_SERVERLESS_V1_FLOOR_ACU
+
+    has_capacity_info = isinstance(min_capacity_raw, (int, float))
+    min_capacity = float(min_capacity_raw) if has_capacity_info else None
+
+    # ── Case 1: Already at service floor — no optimization possible within this service. ──
+    if has_capacity_info and min_capacity <= floor:
+        return {
+            "classification": DB_CLASSIFICATION_SERVICE_FLOOR_REACHED,
+            "suppress": True,
+            "summary": "Aurora is already at minimum serverless capacity",
+            "explanation": "",
+            "recommended_action": "",
+            "safe_to_apply": None,
+            "caution_note": None,
+        }
+
+    # ── Case 2: Can reduce min ACU within same service family (immediate rightsize). ──
+    if has_capacity_info and min_capacity > floor:
+        cap_str = f"{min_capacity} ACU"
+        floor_str = f"{floor} ACU"
+        return {
+            "classification": DB_CLASSIFICATION_IMMEDIATE_RIGHTSIZE,
+            "suppress": False,
+            "summary": "Reduce Aurora Serverless minimum capacity to lower baseline cost",
+            "explanation": (
+                f"Current minimum capacity is {cap_str}. "
+                f"Reducing it toward the service floor ({floor_str}) lowers the baseline compute charge "
+                "without migrating to a different database architecture."
+            ),
+            "recommended_action": (
+                f"Lower the MinCapacity ACU setting toward {floor_str} and monitor CPU, connections, and "
+                "query latency. Validate in a non-production environment before applying to production."
+            ),
+            "safe_to_apply": False,
+            "caution_note": (
+                f"Current minimum capacity is {cap_str}. Reducing it may impact performance under "
+                "sudden load spikes. Validate workload patterns before applying."
+            ),
+        }
+
+    # ── Case 3: No scaling config in evidence — alternative architecture required. ──
+    # Savings may only come from a database architecture migration (e.g., to provisioned RDS).
+    savings_float = float(estimated_savings) if estimated_savings is not None else 0.0
+    if savings_float < float(AURORA_ALT_ARCH_MIN_MONTHLY_SAVINGS_THRESHOLD):
+        # Low projected savings — not worth surfacing a migration recommendation.
+        return {
+            "classification": DB_CLASSIFICATION_LOW_VALUE,
+            "suppress": True,
+            "summary": "Additional Aurora database savings require architecture review",
+            "explanation": "",
+            "recommended_action": "",
+            "safe_to_apply": None,
+            "caution_note": None,
+        }
+
+    return {
+        "classification": DB_CLASSIFICATION_ALT_ARCH_REVIEW,
+        "suppress": False,
+        "summary": "Additional Aurora database savings require a database architecture review",
+        "explanation": (
+            "Further cost reduction beyond the current Aurora Serverless configuration requires "
+            "migrating to a different database architecture, such as a smaller provisioned RDS instance. "
+            "This is a significant operational change that requires careful planning."
+        ),
+        "recommended_action": (
+            "Evaluate migrating to a smaller provisioned RDS instance if workload is consistent "
+            "and migration effort is justified. Review connection patterns, storage needs, and "
+            "operational readiness before proceeding."
+        ),
+        "safe_to_apply": False,
+        "caution_note": (
+            "This savings opportunity requires a database architecture migration, not a simple "
+            "configuration change. Migration risk is high. Treat this as a strategic review item, "
+            "not an active optimization task."
+        ),
+    }
 
 
 def _recommendation_category_for_type(recommendation_type: str) -> str:
@@ -1536,6 +1654,13 @@ def _build_recommendation_for_finding(
 
     if finding.finding_type == "aurora_serverless_review_candidate":
         evidence = finding.evidence_json or {}
+        classified = _classify_aurora_serverless(evidence, estimated_savings)
+
+        if classified["suppress"]:
+            # Service floor reached or low-value migration — do not surface as an active recommendation.
+            # Any existing active recommendation for this resource will be auto-resolved by reconciliation.
+            return None
+
         publicly_accessible = evidence.get("publicly_accessible")
         if publicly_accessible is True:
             access_note = " The instance is publicly accessible, which increases exposure risk."
@@ -1547,7 +1672,15 @@ def _build_recommendation_for_finding(
         rtype = "aurora_serverless_cost_review"
         rcat = _recommendation_category_for_type(rtype)
         sb, cr = _credibility_pair(rtype, rcat, estimated_savings)
-        explanation = _aurora_serverless_explanation(finding) + access_note
+
+        classification = classified["classification"]
+        # Alternative-architecture migrations use higher effort/risk signals.
+        if classification == DB_CLASSIFICATION_ALT_ARCH_REVIEW:
+            confidence = "low"
+            risk_level = "high"
+        else:
+            confidence = "medium"
+            risk_level = "medium"
 
         return Recommendation(
             tenant_id=tenant_id,
@@ -1557,17 +1690,17 @@ def _build_recommendation_for_finding(
             resource_type=finding.resource_type,
             recommendation_type=rtype,
             recommendation_category=rcat,
-            summary="Review Aurora Serverless configuration for cost efficiency",
-            explanation=explanation,
-            risk_level="medium",
-            confidence_score="medium",
-            recommended_action=(
-                "Review scaling configuration and access patterns. "
-                "Ensure capacity settings and public exposure are aligned with workload needs."
-            ),
+            summary=classified["summary"],
+            explanation=classified["explanation"] + access_note,
+            risk_level=risk_level,
+            confidence_score=confidence,
+            recommended_action=classified["recommended_action"],
             estimated_savings=estimated_savings,
             savings_basis=sb,
             confidence_reason=cr,
+            safe_to_apply=classified["safe_to_apply"],
+            caution_note=classified["caution_note"],
+            recommendation_classification=classification,
             created_at=created_at,
         )
 
@@ -2332,6 +2465,7 @@ def _apply_candidate_fields(target: Recommendation, candidate: Recommendation) -
     target.actionability_type = candidate.actionability_type
     target.safe_to_apply = candidate.safe_to_apply
     target.caution_note = candidate.caution_note
+    target.recommendation_classification = candidate.recommendation_classification
     target.estimated_savings = candidate.estimated_savings
     target.savings_basis = candidate.savings_basis
     target.confidence_reason = candidate.confidence_reason

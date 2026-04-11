@@ -84,11 +84,13 @@ def recommendation_scoring_profile(
     estimated_savings: Decimal | float | int | None,
     risk_level: str | None,
     existing_confidence: str | None = None,
+    recommendation_classification: str | None = None,
 ) -> RecommendationScoringProfile:
     rtype = str(recommendation_type or "").strip().lower()
     resource = str(resource_type or "").strip().lower()
     category = str(recommendation_category or "").strip().lower()
     risk = str(risk_level or "").strip().lower()
+    classification = str(recommendation_classification or "").strip().lower()
     savings_text = _format_savings_range(estimated_savings)
     fallback_confidence = _normalize_level(existing_confidence, SCORE_LEVELS, "medium")
 
@@ -112,6 +114,36 @@ def recommendation_scoring_profile(
         "nat_gateway_cost_review",
         "waf_cost_review",
     }:
+        # alternative_architecture_review: migration required — high effort, low confidence.
+        if rtype == "aurora_serverless_cost_review" and classification == "alternative_architecture_review":
+            expected = "Potential cost reduction requires migrating to a different database architecture."
+            if savings_text:
+                expected = f"Potential cost reduction ({savings_text}) requires migrating to a different database architecture."
+            return _profile(
+                "medium",
+                "high",
+                "low",
+                "review_required",
+                why="Savings beyond current Aurora Serverless configuration require a database migration, not a simple config change.",
+                expected=expected,
+                effort_explanation="Database architecture migration is a high-effort, high-risk change requiring thorough planning, testing, and a maintenance window.",
+                confidence_reasoning="Savings estimate is based on a typical workload profile; actual savings depend on migration success and new architecture fit.",
+            )
+        # immediate_rightsize: reduce ACU within same service — moderate effort.
+        if rtype == "aurora_serverless_cost_review" and classification == "immediate_rightsize":
+            expected = "Reduces baseline Aurora compute charge without a database architecture change."
+            if savings_text:
+                expected = f"Can reduce baseline Aurora compute charge ({savings_text}) without a database architecture change."
+            return _profile(
+                "medium",
+                "medium",
+                "medium",
+                "review_required",
+                why="Reducing Aurora Serverless minimum capacity lowers the compute floor while keeping the same architecture.",
+                expected=expected,
+                effort_explanation="Requires lowering a configuration setting and validating performance under load. No architecture migration needed.",
+                confidence_reasoning="Signal is directionally strong, but current workload patterns still require validation before applying.",
+            )
         expected = "Can materially reduce recurring spend after validation and controlled rollout."
         if savings_text:
             expected = f"Can materially reduce recurring spend ({savings_text}) after validation and controlled rollout."
@@ -309,6 +341,7 @@ def apply_scoring_profile(rec: Recommendation) -> Recommendation:
         estimated_savings=rec.estimated_savings,
         risk_level=rec.risk_level,
         existing_confidence=rec.confidence_score,
+        recommendation_classification=getattr(rec, "recommendation_classification", None),
     )
     rec.impact_score = profile.impact_score
     rec.effort_score = profile.effort_score
@@ -327,6 +360,7 @@ def resolved_scoring_profile(rec: Recommendation) -> RecommendationScoringProfil
         estimated_savings=rec.estimated_savings,
         risk_level=rec.risk_level,
         existing_confidence=rec.confidence_score,
+        recommendation_classification=getattr(rec, "recommendation_classification", None),
     )
     return RecommendationScoringProfile(
         impact_score=_normalize_level(getattr(rec, "impact_score", None), SCORE_LEVELS, profile.impact_score),

@@ -220,6 +220,7 @@ class RecommendationRead(BaseModel):
     evidence_json: dict | None = None
     safe_to_apply: bool | None = None
     caution_note: str | None = None
+    recommendation_classification: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

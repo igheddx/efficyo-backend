@@ -30,6 +30,7 @@ class Recommendation(Base):
     actionability_type = Column(String(32), nullable=True)
     safe_to_apply = Column(Boolean, nullable=True)
     caution_note = Column(Text, nullable=True)
+    recommendation_classification = Column(String(64), nullable=True)
     estimated_savings = Column(Numeric(12, 2), nullable=True)
     savings_basis = Column(Text, nullable=True)
     confidence_reason = Column(Text, nullable=True)
