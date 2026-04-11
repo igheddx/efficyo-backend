@@ -198,10 +198,25 @@ def _failed_sync_jobs(db: Session, tenant_id: UUID, cloud_account_id: UUID, limi
     except Exception:
         logger.exception("copilot list_sync_jobs failed")
         return []
+
+    # Find the most recent successful sync completion time.
+    # Any failed job that predates a successful sync is no longer actionable.
+    last_success_at = None
+    for job in jobs:
+        if job.status == "completed" and job.completed_at is not None:
+            last_success_at = job.completed_at
+            break  # list_sync_jobs is ordered desc by created_at
+
     out: list[dict] = []
     for job in jobs:
         if job.status != "failed":
             continue
+        # Suppress if a successful sync has run since this failure
+        if last_success_at is not None and job.created_at is not None:
+            job_created = job.created_at.replace(tzinfo=None) if job.created_at.tzinfo else job.created_at
+            success_at = last_success_at.replace(tzinfo=None) if last_success_at.tzinfo else last_success_at
+            if job_created < success_at:
+                continue
         out.append(
             {
                 "sync_job_id": str(job.id),
