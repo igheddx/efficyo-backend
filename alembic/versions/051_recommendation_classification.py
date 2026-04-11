@@ -8,7 +8,7 @@ Create Date: 2026-04-10
 from alembic import op
 import sqlalchemy as sa
 
-revision = "051_recommendation_classification"
+revision = "051_rec_classification"
 down_revision = "050_recommendation_safety_fields"
 branch_labels = None
 depends_on = None
