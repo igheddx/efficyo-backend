@@ -472,6 +472,11 @@ def _rules_based_structured(
         if isinstance(cost_trends, list):
             trend_items = []
             for t in cost_trends[:5]:
+                # Skip near-zero float artifacts (e.g. $0.00 vs $0.00 → +38998%)
+                cur = abs(float(t.get("current_cost") or 0.0))
+                prev = abs(float(t.get("previous_cost") or 0.0))
+                if cur < 0.01 and prev < 0.01:
+                    continue
                 pct = t.get("percent_change")
                 pct_f = float(pct) if pct is not None else None
                 direction = "flat"
@@ -767,6 +772,10 @@ def _rules_based_response(
         trends = scoped.get("cost_trends")
         if isinstance(trends, list):
             for t in trends[:3]:
+                cur = abs(float(t.get("current_cost") or 0.0))
+                prev = abs(float(t.get("previous_cost") or 0.0))
+                if cur < 0.01 and prev < 0.01:
+                    continue
                 insights.append(f"Cost trend — {t.get('service')}: {t.get('trend')} ({t.get('percent_change')}% WoW).")
 
     elif intent == "tenants":

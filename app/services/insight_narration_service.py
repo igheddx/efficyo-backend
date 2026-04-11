@@ -30,9 +30,17 @@ def _clamp_pct(p: float) -> float:
     return 0.0
 
 
+def _is_meaningful_trend(t: dict) -> bool:
+    """Return False when both costs are negligible float artifacts (< $0.01)."""
+    cur = abs(float(t.get("current_cost") or 0.0))
+    prev = abs(float(t.get("previous_cost") or 0.0))
+    return cur >= 0.01 or prev >= 0.01
+
+
 def _choose_trend_sentences(trends: list[dict]) -> Optional[str]:
-    increasing = [t for t in trends if t.get("trend") == "increasing" and t.get("percent_change") is not None]
-    decreasing = [t for t in trends if t.get("trend") == "decreasing" and t.get("percent_change") is not None]
+    meaningful = [t for t in trends if _is_meaningful_trend(t)]
+    increasing = [t for t in meaningful if t.get("trend") == "increasing" and t.get("percent_change") is not None]
+    decreasing = [t for t in meaningful if t.get("trend") == "decreasing" and t.get("percent_change") is not None]
 
     top_inc = max(increasing, key=lambda t: float(t.get("percent_change", 0.0))) if increasing else None
     top_dec = min(decreasing, key=lambda t: float(t.get("percent_change", 0.0))) if decreasing else None  # most negative
