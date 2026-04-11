@@ -80,7 +80,8 @@ def test_decision_factors_reflect_multi_dimensional_scoring():
     assert factors["normalized_savings"] == 1.0
     assert factors["risk_factor"] == 1.0
     assert factors["confidence_factor"] == 1.0
-    assert factors["urgency_factor"] == pytest.approx(2 / 3, rel=1e-3)
+    # s3_enable_public_access_block is now review_required (actionability order=1) → 1/3
+    assert factors["urgency_factor"] == pytest.approx(1 / 3, rel=1e-3)
     assert factors["impact_factor"] == 1.0
     assert factors["effort_factor"] == pytest.approx(1 / 3, rel=1e-3)
     assert 0.9 < factors["score"] <= 1.0

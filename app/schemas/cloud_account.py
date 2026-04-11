@@ -218,6 +218,8 @@ class RecommendationRead(BaseModel):
     applied_at: datetime | None = None
     execution_notes: str | None = None
     evidence_json: dict | None = None
+    safe_to_apply: bool | None = None
+    caution_note: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

@@ -702,6 +702,8 @@ def recommendation_read_from_orm(
         applied_at=None,
         execution_notes=None,
         evidence_json=payload_evidence or None,
+        safe_to_apply=rec.safe_to_apply,
+        caution_note=rec.caution_note,
     )
 
 
@@ -1658,11 +1660,26 @@ def _build_recommendation_for_finding(
             resource_type=finding.resource_type,
             recommendation_type=rtype,
             recommendation_category=rcat,
-            summary="Enable S3 Public Access Block",
-            explanation="This bucket is not fully protected by S3 Public Access Block. Enable all four controls.",
+            summary="Review S3 public access posture",
+            explanation=(
+                "This bucket does not have all S3 Public Access Block controls enabled. "
+                "While enabling these controls improves security posture, this change may "
+                "break applications that depend on direct public S3 access. Review bucket "
+                "usage and any application dependencies before applying changes."
+            ),
             risk_level="high",
-            confidence_score="high",
-            recommended_action="Enable all S3 Public Access Block settings: block_public_acls, ignore_public_acls, block_public_policy, restrict_public_buckets.",
+            confidence_score="medium",
+            actionability_type="review_required",
+            safe_to_apply=False,
+            caution_note=(
+                "This bucket is publicly accessible. Verify that application behavior "
+                "does not depend on direct S3 public access before applying changes."
+            ),
+            recommended_action=(
+                "Review access patterns for this bucket. If no application depends on "
+                "public access, enable all S3 Public Access Block settings: "
+                "block_public_acls, ignore_public_acls, block_public_policy, restrict_public_buckets."
+            ),
             estimated_savings=estimated_savings,
             savings_basis=sb,
             confidence_reason=cr,
@@ -2313,6 +2330,8 @@ def _apply_candidate_fields(target: Recommendation, candidate: Recommendation) -
     target.recommended_action = candidate.recommended_action
     target.confidence_score = candidate.confidence_score
     target.actionability_type = candidate.actionability_type
+    target.safe_to_apply = candidate.safe_to_apply
+    target.caution_note = candidate.caution_note
     target.estimated_savings = candidate.estimated_savings
     target.savings_basis = candidate.savings_basis
     target.confidence_reason = candidate.confidence_reason

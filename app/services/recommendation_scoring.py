@@ -150,10 +150,21 @@ def recommendation_scoring_profile(
             confidence_reasoning="Observed usage/configuration data supports the recommendation, but runtime behavior should still be checked after change.",
         )
 
+    if rtype == "s3_enable_public_access_block":
+        return _profile(
+            "high",
+            "low",
+            "medium",
+            "review_required",
+            why="S3 public access controls affect bucket accessibility. Application dependencies must be verified before enabling all block settings.",
+            expected="Reduces unintended public exposure risk once safe to apply.",
+            effort_explanation="The change is configuration-only but requires review of application access patterns first.",
+            confidence_reasoning="The configuration gap is clearly detected, but the safety of applying the fix depends on application context.",
+        )
+
     if rtype in {
         "security_group_restrict_world_open_ports",
         "security_group_restrict_ingress",
-        "s3_enable_public_access_block",
         "enable_encryption",
         "cloudfront_enforce_https_redirect",
         "cloudfront_review_insecure_protocol_policy",

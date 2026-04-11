@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from sqlalchemy import Column, DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.db import Base, utc_now
@@ -28,6 +28,8 @@ class Recommendation(Base):
     recommended_action = Column(String(255), nullable=False)
     confidence_score = Column(String(20), nullable=False, default="medium")
     actionability_type = Column(String(32), nullable=True)
+    safe_to_apply = Column(Boolean, nullable=True)
+    caution_note = Column(Text, nullable=True)
     estimated_savings = Column(Numeric(12, 2), nullable=True)
     savings_basis = Column(Text, nullable=True)
     confidence_reason = Column(Text, nullable=True)

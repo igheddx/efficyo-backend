@@ -660,7 +660,8 @@ def _normalize_s3_bucket(bucket: dict, region: str, s3_client, tags: dict | None
     bucket_name = bucket.get("Name", "unknown")
 
     versioning_status = "unknown"
-    encryption_enabled = False
+    # None = unknown (API error / undetermined); False = confirmed not configured; True = confirmed enabled
+    encryption_enabled = None
     public_access_block_status = {}
     lifecycle_rules_count = 0
     bucket_size_bytes_approx = None
@@ -673,9 +674,26 @@ def _normalize_s3_bucket(bucket: dict, region: str, s3_client, tags: dict | None
 
     try:
         encryption_response = s3_client.get_bucket_encryption(Bucket=bucket_name)
-        encryption_enabled = "Rules" in encryption_response
-    except Exception:
-        pass
+        rules = (
+            encryption_response
+            .get("ServerSideEncryptionConfiguration", {})
+            .get("Rules", [])
+        )
+        # Valid if any rule specifies AES256 or aws:kms
+        valid_algorithms = {"AES256", "aws:kms", "aws:kms:dsse"}
+        encryption_enabled = any(
+            r.get("ApplyServerSideEncryptionByDefault", {}).get("SSEAlgorithm") in valid_algorithms
+            for r in rules
+        ) if rules else False
+    except Exception as exc:
+        try:
+            err_code = exc.response["Error"]["Code"]  # type: ignore[attr-defined]
+        except Exception:
+            err_code = None
+        if err_code == "ServerSideEncryptionConfigurationNotFoundError":
+            # Bucket explicitly has no default encryption configured
+            encryption_enabled = False
+        # Any other exception (access denied, throttling, etc.) → leave as None (unknown)
 
     try:
         pab_response = s3_client.get_public_access_block(Bucket=bucket_name)
