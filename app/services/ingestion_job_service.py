@@ -26,31 +26,38 @@ class ActiveSyncJobExists(Exception):
         self.job = job
 
 
-def reap_orphaned_jobs(db_session: Session) -> int:
-    """Mark any jobs stuck in queued/running longer than the orphan threshold as failed.
+def reap_orphaned_jobs(db_session: Session, *, unconditional: bool = False) -> int:
+    """Mark any jobs stuck in queued/running state as failed.
 
-    Called once at server startup so a crash/restart never blocks future syncs.
+    Args:
+        unconditional: When True (worker startup), reap ALL running/queued jobs
+            regardless of age — the previous worker process is dead so any active
+            job is orphaned by definition.  When False (periodic check), only
+            reap jobs older than _ORPHAN_THRESHOLD_MINUTES.
+
     Returns the number of jobs reaped.
     """
-    cutoff = utc_now() - timedelta(minutes=_ORPHAN_THRESHOLD_MINUTES)
-    orphans = (
-        db_session.query(IngestionJob)
-        .filter(
-            IngestionJob.status.in_(("queued", "running")),
-            IngestionJob.updated_at < cutoff,
-        )
-        .all()
+    q = db_session.query(IngestionJob).filter(
+        IngestionJob.status.in_(("queued", "running")),
     )
+    if not unconditional:
+        cutoff = utc_now() - timedelta(minutes=_ORPHAN_THRESHOLD_MINUTES)
+        q = q.filter(IngestionJob.updated_at < cutoff)
+    orphans = q.all()
     for job in orphans:
+        prior = job.status
         job.status = "failed"
         job.error_message = (
-            f"Job reaped at startup: was stuck in '{job.status}' state for >"
-            f"{_ORPHAN_THRESHOLD_MINUTES} min (likely a server crash)."
+            "Job reaped at worker startup: previous worker process terminated "
+            f"while job was in '{prior}' state."
+        ) if unconditional else (
+            f"Job reaped: stuck in '{prior}' state for >{_ORPHAN_THRESHOLD_MINUTES} min."
         )
         job.updated_at = utc_now()
         logger.warning(
             "Reaped orphaned sync job",
-            extra={"job_id": str(job.id), "job_type": job.job_type, "prior_status": job.status},
+            extra={"job_id": str(job.id), "job_type": job.job_type, "prior_status": prior,
+                   "unconditional": unconditional},
         )
     if orphans:
         db_session.commit()

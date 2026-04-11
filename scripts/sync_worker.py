@@ -57,9 +57,11 @@ def main() -> int:
     _write_heartbeat(worker_id=worker_id, state="starting")
 
     # Reap any jobs left in running/queued state by a previous worker process.
+    # Use unconditional=True: this worker is starting fresh so the previous
+    # process is dead — any active job is orphaned regardless of age.
     _startup_db = SessionLocal()
     try:
-        reaped = ingestion_job_service.reap_orphaned_jobs(_startup_db)
+        reaped = ingestion_job_service.reap_orphaned_jobs(_startup_db, unconditional=True)
         if reaped:
             import logging
             logging.getLogger(__name__).warning("Worker startup: reaped %d orphaned sync job(s).", reaped)
