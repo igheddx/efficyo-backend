@@ -353,7 +353,12 @@ def _top_opportunities(db: Session, tenant_id: UUID, cloud_account_id: UUID, lim
 def _cost_trends(db: Session, tenant_id: UUID, cloud_account_id: UUID, limit: int) -> list[dict] | dict:
     try:
         raw = trend_service.detect_cost_trends(db, tenant_id, cloud_account_id)
-        scored = sorted(raw, key=lambda r: abs(float(r.get("percent_change") or 0)), reverse=True)[:limit]
+        # Exclude rows where both costs are negligible float artifacts (e.g. $0.00 vs $0.00 → +38998%)
+        meaningful = [
+            r for r in raw
+            if abs(float(r.get("current_cost") or 0.0)) >= 0.01 or abs(float(r.get("previous_cost") or 0.0)) >= 0.01
+        ]
+        scored = sorted(meaningful, key=lambda r: abs(float(r.get("percent_change") or 0)), reverse=True)[:limit]
         return scored
     except Exception as exc:
         logger.info("copilot cost trends unavailable: %s", exc)
