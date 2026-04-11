@@ -11,7 +11,7 @@ from app.core.db import SessionLocal, utc_now
 from app.models.ingestion_job import IngestionJob
 
 # Jobs stuck longer than this are considered orphaned (server crashed mid-run).
-_ORPHAN_THRESHOLD_MINUTES: int = 120
+_ORPHAN_THRESHOLD_MINUTES: int = 30
 from app.services import cloud_account_service, detection_service, ingestion_service, recommendation_service, tenant_service
 from app.sync.jobs.cost_sync import CostSyncJobRunner
 from app.sync.jobs.resource_sync import run_resource_sync

@@ -56,6 +56,16 @@ def main() -> int:
     queue: TaskQueue = DatabaseTaskQueue()
     _write_heartbeat(worker_id=worker_id, state="starting")
 
+    # Reap any jobs left in running/queued state by a previous worker process.
+    _startup_db = SessionLocal()
+    try:
+        reaped = ingestion_job_service.reap_orphaned_jobs(_startup_db)
+        if reaped:
+            import logging
+            logging.getLogger(__name__).warning("Worker startup: reaped %d orphaned sync job(s).", reaped)
+    finally:
+        _startup_db.close()
+
     # Worker loop
     while True:
         db = SessionLocal()
